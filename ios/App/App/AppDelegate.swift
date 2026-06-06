@@ -1,5 +1,6 @@
 import UIKit
 import Capacitor
+import WebKit
 
 @UIApplicationMain
 class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -52,6 +53,14 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     // but the device token never reaches the web layer.
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         NotificationCenter.default.post(name: .capacitorDidRegisterForRemoteNotifications, object: deviceToken)
+        // The @capacitor/push-notifications `registration` JS event does not reach
+        // the web layer when the WebView loads a remote server.url, so hand the
+        // token to the dashboard directly via a global it defines.
+        let hex = deviceToken.map { String(format: "%02x", $0) }.joined()
+        DispatchQueue.main.async {
+            let js = "alert('[native] didRegister 已触发'); window.__sbApnsToken && window.__sbApnsToken('\(hex)')"
+            (self.window?.rootViewController as? CAPBridgeViewController)?.webView?.evaluateJavaScript(js, completionHandler: nil)
+        }
     }
 
     func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
