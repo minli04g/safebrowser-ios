@@ -2,7 +2,7 @@ import type { CapacitorConfig } from '@capacitor/cli'
 
 const config: CapacitorConfig = {
   appId: 'top.fancytech.sf',
-  appName: 'SafeBrowser',
+  appName: 'SafeBrowser Parent',
   // webDir holds a fallback bundle shown only if the remote URL is unreachable.
   webDir: 'www',
   server: {
