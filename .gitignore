@@ -1,0 +1,7 @@
+node_modules/
+www/build/
+ios/App/build/
+ios/App/Pods/
+.DS_Store
+*.log
+DerivedData/
