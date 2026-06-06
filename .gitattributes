@@ -1,0 +1,4 @@
+*.pbxproj -text
+*.plist text eol=lf
+*.xcscheme text eol=lf
+*.entitlements text eol=lf
