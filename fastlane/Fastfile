@@ -25,8 +25,8 @@ platform :ios do
   # enabled), so we skip that and only create the ASC app.
   desc 'Create the App Store Connect app record (run once)'
   lane :create_app do
+    asc_key # sets the API key in lane context; produce reads it from there
     produce(
-      api_key: asc_key,
       app_identifier: 'top.fancytech.sf',
       app_name: "Min's SafeBrowser Parent",
       language: 'English',
