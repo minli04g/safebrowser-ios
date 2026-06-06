@@ -51,33 +51,15 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     // @capacitor/push-notifications `registration` / `registrationError` JS
     // events fire. Without these, iOS registers the app (it shows in Settings)
     // but the device token never reaches the web layer.
-    // TEMP diagnostic: truly-native popup (independent of the WebView) so we can
-    // see whether the APNs callbacks fire at all. Remove once push is verified.
-    private func sbDiag(_ msg: String) {
-        DispatchQueue.main.async {
-            guard let root = self.window?.rootViewController else { return }
-            var top = root
-            while let presented = top.presentedViewController { top = presented }
-            let alert = UIAlertController(title: "native push", message: msg, preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "OK", style: .default))
-            top.present(alert, animated: true)
-        }
-    }
-
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
-        NotificationCenter.default.post(name: .capacitorDidRegisterForRemoteNotifications, object: deviceToken)
+        // The @capacitor/push-notifications `registration` JS event doesn't reach a
+        // remotely-loaded (server.url) WebView, so hand the lowercase hex token to
+        // the dashboard global (window.__sbApnsToken) directly.
         let hex = deviceToken.map { String(format: "%02x", $0) }.joined()
-        let bridgeOk = (self.window?.rootViewController as? CAPBridgeViewController) != nil
-        sbDiag("didRegister ✓ len=\(deviceToken.count) bridgeVC=\(bridgeOk)")
         DispatchQueue.main.async {
             let js = "window.__sbApnsToken && window.__sbApnsToken('\(hex)')"
             (self.window?.rootViewController as? CAPBridgeViewController)?.webView?.evaluateJavaScript(js, completionHandler: nil)
         }
-    }
-
-    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
-        NotificationCenter.default.post(name: .capacitorDidFailToRegisterForRemoteNotifications, object: error)
-        sbDiag("didFail: \(error.localizedDescription)")
     }
 
 }
