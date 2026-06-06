@@ -18,6 +18,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Loads the per-repo deploy key so fastlane match can clone/push the
+      # private certs repo over SSH (also adds github.com to known_hosts).
+      - uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.MATCH_SSH_KEY }}
+
       - uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: '26.0' # Capacitor 8 requires Xcode 26+
@@ -45,5 +51,3 @@ jobs:
           ASC_KEY_CONTENT: ${{ secrets.ASC_KEY_CONTENT }}
           MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
           MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
-          GIT_USERNAME: ${{ secrets.GIT_USERNAME }}
-          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}

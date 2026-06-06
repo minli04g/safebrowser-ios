@@ -11,26 +11,20 @@ platform :ios do
     )
   end
 
-  def git_auth
-    Base64.strict_encode64("#{ENV['GIT_USERNAME']}:#{ENV['GIT_TOKEN']}")
-  end
-
   # ONE-TIME: creates the distribution cert + appstore profile via the ASC API
-  # and stores them (encrypted) in the private match repo. Run via
-  # workflow_dispatch once, then never again.
+  # and stores them (encrypted) in the private match repo (over SSH — the CI job
+  # loads the deploy key via ssh-agent). Run via workflow_dispatch once.
   desc 'Initialize signing certs in the match repo (run once)'
   lane :init_signing do
     setup_ci
-    match(type: 'appstore', api_key: asc_key, readonly: false,
-          git_basic_authorization: git_auth)
+    match(type: 'appstore', api_key: asc_key, readonly: false)
   end
 
   desc 'Build and upload to TestFlight'
   lane :beta do
     api_key = asc_key
     setup_ci
-    match(type: 'appstore', api_key: api_key, readonly: true,
-          git_basic_authorization: git_auth)
+    match(type: 'appstore', api_key: api_key, readonly: true)
     build_app(
       project: 'ios/App/App.xcodeproj', # SPM project — no .xcworkspace
       scheme: 'App',                    # Capacitor's default iOS scheme
