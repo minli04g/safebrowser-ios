@@ -10,7 +10,7 @@ on:
         required: true
         default: 'beta'
         type: choice
-        options: [beta, init_signing]
+        options: [beta, init_signing, create_app]
 
 jobs:
   ios:

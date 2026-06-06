@@ -20,6 +20,22 @@ platform :ios do
     match(type: 'appstore', api_key: asc_key, readonly: false)
   end
 
+  # ONE-TIME: create the App Store Connect app record so TestFlight uploads
+  # have a destination. The App ID already exists in the dev portal (push
+  # enabled), so we skip that and only create the ASC app.
+  desc 'Create the App Store Connect app record (run once)'
+  lane :create_app do
+    produce(
+      api_key: asc_key,
+      app_identifier: 'top.fancytech.sf',
+      app_name: "Min's SafeBrowser Parent",
+      language: 'English',
+      sku: 'safebrowser-parent-ios',
+      skip_itc: false,
+      skip_devcenter: true
+    )
+  end
+
   desc 'Build and upload to TestFlight'
   lane :beta do
     api_key = asc_key
