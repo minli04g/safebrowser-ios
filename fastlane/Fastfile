@@ -41,10 +41,28 @@ platform :ios do
     api_key = asc_key
     setup_ci
     match(type: 'appstore', api_key: api_key, readonly: true)
+    # Capacitor defaults to automatic signing; switch the App target to manual
+    # signing with the match-provisioned profile so the ephemeral runner reuses
+    # the one stored distribution cert/profile.
+    update_code_signing_settings(
+      path: 'ios/App/App.xcodeproj',
+      use_automatic_signing: false,
+      team_id: 'C9DKTHSYYB',
+      code_sign_identity: 'Apple Distribution',
+      bundle_identifier: 'top.fancytech.sf',
+      profile_name: 'match AppStore top.fancytech.sf',
+      targets: ['App']
+    )
     build_app(
       project: 'ios/App/App.xcodeproj', # SPM project — no .xcworkspace
       scheme: 'App',                    # Capacitor's default iOS scheme
-      export_method: 'app-store'
+      export_method: 'app-store',
+      export_options: {
+        signingStyle: 'manual',
+        provisioningProfiles: {
+          'top.fancytech.sf' => 'match AppStore top.fancytech.sf'
+        }
+      }
     )
     upload_to_testflight(api_key: api_key, skip_waiting_for_build_processing: true)
   end
