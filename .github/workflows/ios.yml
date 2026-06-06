@@ -40,8 +40,10 @@ jobs:
           ruby-version: '3.3'
           bundler-cache: true
 
-      - name: Ensure push entitlement
+      - name: Prepare Xcode project (entitlement + build number)
         run: bundle exec ruby scripts/ensure-entitlements.rb
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
 
       - name: Fastlane ${{ github.event.inputs.lane || 'beta' }}
         run: bundle exec fastlane ${{ github.event.inputs.lane || 'beta' }}
