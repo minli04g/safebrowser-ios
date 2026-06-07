@@ -1,9 +1,10 @@
 import UIKit
 import Capacitor
 import WebKit
+import UserNotifications
 
 @UIApplicationMain
-class AppDelegate: UIResponder, UIApplicationDelegate {
+class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterDelegate {
 
     var window: UIWindow?
 
@@ -13,25 +14,27 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     func applicationWillResignActive(_ application: UIApplication) {
-        // Sent when the application is about to move from active to inactive state. This can occur for certain types of temporary interruptions (such as an incoming phone call or SMS message) or when the user quits the application and it begins the transition to the background state.
-        // Use this method to pause ongoing tasks, disable timers, and invalidate graphics rendering callbacks. Games should use this method to pause the game.
     }
 
     func applicationDidEnterBackground(_ application: UIApplication) {
-        // Use this method to release shared resources, save user data, invalidate timers, and store enough application state information to restore your application to its current state in case it is terminated later.
-        // If your application supports background execution, this method is called instead of applicationWillTerminate: when the user quits.
     }
 
     func applicationWillEnterForeground(_ application: UIApplication) {
-        // Called as part of the transition from the background to the active state; here you can undo many of the changes made on entering the background.
     }
 
     func applicationDidBecomeActive(_ application: UIApplication) {
-        // Restart any tasks that were paused (or not yet started) while the application was inactive. If the application was previously in the background, optionally refresh the user interface.
+        // Claim the notification-center delegate so notification taps are handled
+        // natively (see userNotificationCenter(_:didReceive:)). Re-asserted on
+        // every foreground because @capacitor/push-notifications sets itself as the
+        // delegate during WebView load; this runs before the tap's didReceive on a
+        // background wake, so our handler wins. We deliberately don't rely on the
+        // plugin's JS notification events — both the APNs token and the tap are
+        // delivered via native evaluateJavaScript, the only reliable path for a
+        // WebView loading a remote server.url.
+        UNUserNotificationCenter.current().delegate = self
     }
 
     func applicationWillTerminate(_ application: UIApplication) {
-        // Called when the application is about to terminate. Save data if appropriate. See also applicationDidEnterBackground:.
     }
 
     func application(_ app: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
@@ -47,10 +50,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         return ApplicationDelegateProxy.shared.application(application, continue: userActivity, restorationHandler: restorationHandler)
     }
 
-    // Forward APNs registration callbacks to Capacitor so the
-    // @capacitor/push-notifications `registration` / `registrationError` JS
-    // events fire. Without these, iOS registers the app (it shows in Settings)
-    // but the device token never reaches the web layer.
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         // The @capacitor/push-notifications `registration` JS event doesn't reach a
         // remotely-loaded (server.url) WebView, so hand the lowercase hex token to
@@ -59,6 +58,58 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         DispatchQueue.main.async {
             let js = "window.__sbApnsToken && window.__sbApnsToken('\(hex)')"
             (self.window?.rootViewController as? CAPBridgeViewController)?.webView?.evaluateJavaScript(js, completionHandler: nil)
+        }
+    }
+
+    // MARK: - UNUserNotificationCenterDelegate
+
+    // Show the notification banner even when the app is in the foreground.
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound, .badge])
+    }
+
+    // Notification tapped. Like the token, the plugin's pushNotificationActionPerformed
+    // JS event doesn't reliably reach a remote server.url WebView (especially on a
+    // background wake), so deliver the requestId to the dashboard global
+    // window.__sbOpenRequest via evaluateJavaScript instead.
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        let userInfo = response.notification.request.content.userInfo
+        // apns2 puts custom `data` at the payload root, so requestId is top-level.
+        if let requestId = userInfo["requestId"] as? String, !requestId.isEmpty {
+            openRequestInWebView(requestId)
+        }
+        completionHandler()
+    }
+
+    // Call window.__sbOpenRequest(requestId) in the dashboard. Retries until the
+    // WebView exists and the dashboard has defined the global — covers a cold
+    // launch from a tap, where the page hasn't finished loading yet.
+    private func openRequestInWebView(_ requestId: String, attemptsLeft: Int = 30) {
+        DispatchQueue.main.async {
+            guard let webView = (self.window?.rootViewController as? CAPBridgeViewController)?.webView else {
+                if attemptsLeft > 0 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        self.openRequestInWebView(requestId, attemptsLeft: attemptsLeft - 1)
+                    }
+                }
+                return
+            }
+            let escaped = requestId
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "'", with: "\\'")
+            let js = "(window.__sbOpenRequest ? (window.__sbOpenRequest('\(escaped)'), true) : false)"
+            webView.evaluateJavaScript(js) { result, _ in
+                let handled = (result as? Bool) ?? false
+                if !handled && attemptsLeft > 0 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        self.openRequestInWebView(requestId, attemptsLeft: attemptsLeft - 1)
+                    }
+                }
+            }
         }
     }
 
