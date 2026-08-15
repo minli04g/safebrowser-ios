@@ -72,41 +72,52 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
 
     // Notification tapped. Like the token, the plugin's pushNotificationActionPerformed
     // JS event doesn't reliably reach a remote server.url WebView (especially on a
-    // background wake), so deliver the requestId to the dashboard global
-    // window.__sbOpenRequest via evaluateJavaScript instead.
+    // background wake), so deliver the identifier to the dashboard global via
+    // evaluateJavaScript instead.
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         let userInfo = response.notification.request.content.userInfo
-        // apns2 puts custom `data` at the payload root, so requestId is top-level.
-        if let requestId = userInfo["requestId"] as? String, !requestId.isEmpty {
+        // apns2 puts custom `data` at the payload root. Message taps take
+        // precedence when both identifiers are present.
+        if let conversationId = userInfo["conversationId"] as? String, !conversationId.isEmpty {
+            openMessageInWebView(conversationId)
+        } else if let requestId = userInfo["requestId"] as? String, !requestId.isEmpty {
             openRequestInWebView(requestId)
         }
         completionHandler()
     }
 
-    // Call window.__sbOpenRequest(requestId) in the dashboard. Retries until the
-    // WebView exists and the dashboard has defined the global — covers a cold
+    // Call the dashboard deep-link global. Retries until the WebView exists and
+    // the dashboard has defined the global — covers a cold
     // launch from a tap, where the page hasn't finished loading yet.
     private func openRequestInWebView(_ requestId: String, attemptsLeft: Int = 30) {
+        openIdentifierInWebView(requestId, global: "__sbOpenRequest", attemptsLeft: attemptsLeft)
+    }
+
+    private func openMessageInWebView(_ conversationId: String, attemptsLeft: Int = 30) {
+        openIdentifierInWebView(conversationId, global: "__sbOpenMessage", attemptsLeft: attemptsLeft)
+    }
+
+    private func openIdentifierInWebView(_ identifier: String, global: String, attemptsLeft: Int) {
         DispatchQueue.main.async {
             guard let webView = (self.window?.rootViewController as? CAPBridgeViewController)?.webView else {
                 if attemptsLeft > 0 {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        self.openRequestInWebView(requestId, attemptsLeft: attemptsLeft - 1)
+                        self.openIdentifierInWebView(identifier, global: global, attemptsLeft: attemptsLeft - 1)
                     }
                 }
                 return
             }
-            let escaped = requestId
+            let escaped = identifier
                 .replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "'", with: "\\'")
-            let js = "(window.__sbOpenRequest ? (window.__sbOpenRequest('\(escaped)'), true) : false)"
+            let js = "(window.\(global) ? (window.\(global)('\(escaped)'), true) : false)"
             webView.evaluateJavaScript(js) { result, _ in
                 let handled = (result as? Bool) ?? false
                 if !handled && attemptsLeft > 0 {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        self.openRequestInWebView(requestId, attemptsLeft: attemptsLeft - 1)
+                        self.openIdentifierInWebView(identifier, global: global, attemptsLeft: attemptsLeft - 1)
                     }
                 }
             }
