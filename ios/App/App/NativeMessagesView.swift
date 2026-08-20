@@ -3,6 +3,12 @@ import SwiftUI
 
 @MainActor
 final class NativeMessageStore: ObservableObject {
+    private struct ExpectedOwnMessageEcho {
+        let id: UUID
+        let conversationId: String
+        let expiresAt: Date
+    }
+
     @Published private(set) var conversations: [NativeMessageConversation] = []
     @Published private(set) var isLoading = false
     @Published var errorText: String?
@@ -17,6 +23,7 @@ final class NativeMessageStore: ObservableObject {
     private var socketTask: Task<Void, Never>?
     private var webSocket: URLSessionWebSocketTask?
     private var signedOut = false
+    private var expectedOwnMessageEchoes: [ExpectedOwnMessageEcho] = []
 
     init(api: NativeMessageAPI) {
         self.api = api
@@ -49,6 +56,7 @@ final class NativeMessageStore: ObservableObject {
         conversations = []
         selectedConversationId = nil
         changedConversationId = nil
+        expectedOwnMessageEchoes = []
         lastParentEventType = nil
         errorText = "Sign in from Manage to use Messages."
     }
@@ -84,6 +92,21 @@ final class NativeMessageStore: ObservableObject {
         }
     }
 
+    func expectOwnMessageEcho(conversationId: String) -> UUID {
+        discardExpiredOwnMessageEchoes()
+        let id = UUID()
+        expectedOwnMessageEchoes.append(ExpectedOwnMessageEcho(
+            id: id,
+            conversationId: conversationId,
+            expiresAt: Date().addingTimeInterval(10)
+        ))
+        return id
+    }
+
+    func cancelExpectedOwnMessageEcho(_ id: UUID) {
+        expectedOwnMessageEchoes.removeAll { $0.id == id }
+    }
+
     func openConversation(_ conversationId: String) {
         guard !signedOut else { return }
         selectedConversationId = conversationId
@@ -109,6 +132,10 @@ final class NativeMessageStore: ObservableObject {
                     lastParentEventType = event.type
                     parentEventVersion += 1
                     if event.type == "messages.changed" {
+                        if let conversationId = event.conversationId,
+                           consumeExpectedOwnMessageEcho(conversationId: conversationId) {
+                            continue
+                        }
                         changedConversationId = event.conversationId
                         changeVersion += 1
                         await refresh()
@@ -121,6 +148,20 @@ final class NativeMessageStore: ObservableObject {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
         }
+    }
+
+    private func consumeExpectedOwnMessageEcho(conversationId: String) -> Bool {
+        discardExpiredOwnMessageEchoes()
+        guard let index = expectedOwnMessageEchoes.firstIndex(where: {
+            $0.conversationId == conversationId
+        }) else { return false }
+        expectedOwnMessageEchoes.remove(at: index)
+        return true
+    }
+
+    private func discardExpiredOwnMessageEchoes() {
+        let now = Date()
+        expectedOwnMessageEchoes.removeAll { $0.expiresAt <= now }
     }
 }
 
@@ -168,6 +209,10 @@ struct NativeMessagesRootView: View {
         }
         .navigationViewStyle(.stack)
         .onAppear { store.start() }
+        .onChange(of: store.selectedConversationId) { conversationId in
+            guard conversationId == nil else { return }
+            Task { await store.refresh() }
+        }
     }
 }
 
@@ -301,10 +346,6 @@ private struct NativeMessageThreadView: View {
         .task { await loadMessages() }
         .onChange(of: store.changeVersion) { _ in
             guard store.changedConversationId == conversation.id else { return }
-            // The send response already contains the authoritative message.
-            // Ignore its early socket echo while an optimistic row is still
-            // pending so the history is not replaced underneath that row.
-            guard !messages.contains(where: { $0.delivery == .sending }) else { return }
             Task { await loadMessages() }
         }
         .alert("Message Error", isPresented: Binding(
@@ -325,14 +366,13 @@ private struct NativeMessageThreadView: View {
                         Button("Load older messages") { Task { await loadOlder() } }
                             .font(.caption)
                     }
-                    ForEach(messages.indices, id: \.self) { index in
-                        let message = messages[index]
-                        if shouldShowTimestamp(at: index) {
+                    ForEach(messages) { message in
+                        if shouldShowTimestamp(for: message) {
                             Text(message.record.date, style: .time)
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
-                        NativeMessageBubble(message: message, api: store.api).id(message.id)
+                        NativeMessageBubble(message: message, api: store.api)
                     }
                     Color.clear.frame(height: 1).id("native-message-bottom")
                 }
@@ -547,8 +587,8 @@ private struct NativeMessageThreadView: View {
         }
     }
 
-    private func shouldShowTimestamp(at index: Int) -> Bool {
-        guard messages.indices.contains(index) else { return false }
+    private func shouldShowTimestamp(for message: NativeDisplayMessage) -> Bool {
+        guard let index = messages.firstIndex(where: { $0.id == message.id }) else { return false }
         guard index > 0 else { return true }
         return messages[index].record.date.timeIntervalSince(messages[index - 1].record.date) >= 5 * 60
     }
@@ -622,23 +662,26 @@ private struct NativeMessageThreadView: View {
     }
 
     private func mergeServerMessages(_ records: [NativeMessageRecord]) {
-        let existingByRecordId = Dictionary(
-            messages.map { ($0.record.id, $0) },
-            uniquingKeysWith: { current, _ in current }
-        )
-        let serverRecordIds = Set(records.map(\.id))
-        let serverMessages = records.map { record in
-            NativeDisplayMessage(
-                id: existingByRecordId[record.id]?.id ?? record.id,
-                record: record,
-                delivery: .sent
-            )
+        guard !messages.isEmpty else {
+            messages = records.map {
+                NativeDisplayMessage(id: $0.id, record: $0, delivery: .sent)
+            }
+            return
         }
-        let localMessages = messages.filter { message in
-            guard !serverRecordIds.contains(message.record.id) else { return false }
-            return message.delivery != .sent || message.id.hasPrefix("local-")
+
+        var merged = messages
+        for record in records {
+            if let index = merged.firstIndex(where: { $0.record.id == record.id }) {
+                let current = merged[index]
+                merged[index] = NativeDisplayMessage(
+                    id: current.id,
+                    record: record,
+                    delivery: .sent
+                )
+            } else {
+                merged.append(NativeDisplayMessage(id: record.id, record: record, delivery: .sent))
+            }
         }
-        let merged = serverMessages + localMessages
         guard merged != messages else { return }
 
         var transaction = Transaction()
@@ -685,6 +728,7 @@ private struct NativeMessageThreadView: View {
         draft = ""
         selectedMentions = []
         DispatchQueue.main.async { composerFocused = true }
+        let echoId = store.expectOwnMessageEcho(conversationId: conversation.id)
 
         Task {
             do {
@@ -694,8 +738,8 @@ private struct NativeMessageThreadView: View {
                 } else if !messages.contains(where: { $0.id == sent.id }) {
                     messages.append(NativeDisplayMessage(id: sent.id, record: sent, delivery: .sent))
                 }
-                await store.refresh()
             } catch {
+                store.cancelExpectedOwnMessageEcho(echoId)
                 if let index = messages.firstIndex(where: { $0.id == clientId }) {
                     messages[index].delivery = .failed
                 }
@@ -705,6 +749,7 @@ private struct NativeMessageThreadView: View {
     }
 
     private func sendVoice(_ capture: NativeVoiceCapture) {
+        let echoId = store.expectOwnMessageEcho(conversationId: conversation.id)
         Task {
             do {
                 let sent = try await store.api.sendVoiceMessage(
@@ -715,8 +760,8 @@ private struct NativeMessageThreadView: View {
                 if !messages.contains(where: { $0.id == sent.id }) {
                     messages.append(NativeDisplayMessage(id: sent.id, record: sent, delivery: .sent))
                 }
-                await store.refresh()
             } catch {
+                store.cancelExpectedOwnMessageEcho(echoId)
                 sendError = error.localizedDescription
             }
         }
