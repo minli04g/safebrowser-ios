@@ -369,7 +369,7 @@ private struct NativeMessageThreadView: View {
         VStack(spacing: 0) {
             if !mentionCandidates.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 18) {
                         ForEach(mentionCandidates) { member in
                             Button {
                                 chooseMention(member)
@@ -378,18 +378,14 @@ private struct NativeMessageThreadView: View {
                                     NativeAvatar(url: store.api.absoluteURL(member.avatarUrl), label: member.label, size: 26)
                                     Text(member.label)
                                 }
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
-                                .background(Color(.secondarySystemBackground))
-                                .clipShape(Capsule())
+                                .padding(.vertical, 8)
                             }
                             .buttonStyle(.plain)
                         }
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
+                    .padding(.horizontal, 12)
                 }
-                Divider()
+                .background(Color(.secondarySystemBackground))
             }
             Divider()
             HStack(alignment: .bottom, spacing: 8) {
