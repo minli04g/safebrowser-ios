@@ -605,6 +605,7 @@ private struct NativeRequestSummaryCard: View {
                                 durationChip("\(minutes)m", active: !customMode && selectedMinutes == minutes) {
                                     selectedMinutes = minutes
                                     customMode = false
+                                    customInput = ""
                                     customFieldFocused = false
                                 }
                             }
@@ -613,7 +614,7 @@ private struct NativeRequestSummaryCard: View {
                             } else {
                                 durationChip("+ Custom", active: false) {
                                     customMode = true
-                                    if customInput.isEmpty { customInput = String(selectedMinutes) }
+                                    customInput = ""
                                     DispatchQueue.main.async { customFieldFocused = true }
                                 }
                             }
@@ -702,8 +703,12 @@ private struct NativeRequestSummaryCard: View {
     }
 
     private var usageTodayText: String {
-        let minutes = max(0, Int((request.targetUsageTodayMs ?? 0) / 60_000))
-        return "\(minutes) min"
+        let totalMinutes = max(0, Int(((request.targetUsageTodayMs ?? 0) / 60_000).rounded()))
+        guard totalMinutes >= 60 else { return "\(totalMinutes) min" }
+
+        let hours = totalMinutes / 60
+        let minutes = totalMinutes % 60
+        return minutes == 0 ? "\(hours) hr" : "\(hours) hr \(minutes) min"
     }
 
     private func durationChip(_ label: String, active: Bool, action: @escaping () -> Void) -> some View {
