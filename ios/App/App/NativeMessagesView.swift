@@ -249,7 +249,7 @@ private enum NativeDeliveryState: Equatable {
     case failed
 }
 
-private struct NativeDisplayMessage: Identifiable {
+private struct NativeDisplayMessage: Identifiable, Equatable {
     let id: String
     var record: NativeMessageRecord
     var delivery: NativeDeliveryState
@@ -301,6 +301,10 @@ private struct NativeMessageThreadView: View {
         .task { await loadMessages() }
         .onChange(of: store.changeVersion) { _ in
             guard store.changedConversationId == conversation.id else { return }
+            // The send response already contains the authoritative message.
+            // Ignore its early socket echo while an optimistic row is still
+            // pending so the history is not replaced underneath that row.
+            guard !messages.contains(where: { $0.delivery == .sending }) else { return }
             Task { await loadMessages() }
         }
         .alert("Message Error", isPresented: Binding(
@@ -609,16 +613,39 @@ private struct NativeMessageThreadView: View {
         defer { loading = false }
         do {
             let page = try await store.api.listMessages(conversationId: conversation.id)
-            let pending = messages.filter { $0.delivery != .sent }
-            let serverMessages = page.messages.map { NativeDisplayMessage(id: $0.id, record: $0, delivery: .sent) }
-            messages = serverMessages + pending.filter { pendingMessage in
-                !serverMessages.contains(where: { $0.id == pendingMessage.id })
-            }
+            mergeServerMessages(page.messages)
             nextBefore = page.nextBefore
             try await store.api.markSeen(conversationId: conversation.id, messageId: page.messages.last?.id)
             store.clearUnread(conversationId: conversation.id)
         } catch {
             sendError = error.localizedDescription
+        }
+    }
+
+    private func mergeServerMessages(_ records: [NativeMessageRecord]) {
+        let existingByRecordId = Dictionary(
+            messages.map { ($0.record.id, $0) },
+            uniquingKeysWith: { current, _ in current }
+        )
+        let serverRecordIds = Set(records.map(\.id))
+        let serverMessages = records.map { record in
+            NativeDisplayMessage(
+                id: existingByRecordId[record.id]?.id ?? record.id,
+                record: record,
+                delivery: .sent
+            )
+        }
+        let localMessages = messages.filter { message in
+            guard !serverRecordIds.contains(message.record.id) else { return false }
+            return message.delivery != .sent || message.id.hasPrefix("local-")
+        }
+        let merged = serverMessages + localMessages
+        guard merged != messages else { return }
+
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            messages = merged
         }
     }
 
@@ -664,8 +691,7 @@ private struct NativeMessageThreadView: View {
             do {
                 let sent = try await store.api.sendMessage(conversationId: conversation.id, text: text, mentions: mentions)
                 if let index = messages.firstIndex(where: { $0.id == clientId }) {
-                    messages[index].record = sent
-                    messages[index].delivery = .sent
+                    messages[index] = NativeDisplayMessage(id: clientId, record: sent, delivery: .sent)
                 } else if !messages.contains(where: { $0.id == sent.id }) {
                     messages.append(NativeDisplayMessage(id: sent.id, record: sent, delivery: .sent))
                 }
