@@ -430,7 +430,6 @@ private struct NativeMessageThreadView: View {
                     .padding(.trailing, 6)
                     .frame(minHeight: 40)
                     .background(Color(.systemBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                     .layoutPriority(1)
                 }
 
