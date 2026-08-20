@@ -255,6 +255,14 @@ private struct NativeDisplayMessage: Identifiable {
     var delivery: NativeDeliveryState
 }
 
+private enum NativeComposerMode: Equatable {
+    case idle
+    case keyboard
+    case emoji
+    case more
+    case voice
+}
+
 private struct NativeMessageThreadView: View {
     let conversation: NativeMessageConversation
     @ObservedObject var store: NativeMessageStore
@@ -265,7 +273,7 @@ private struct NativeMessageThreadView: View {
     @State private var draft = ""
     @State private var selectedMentions: [NativeMessageActor] = []
     @State private var sendError: String?
-    @State private var quickEmojisVisible = false
+    @State private var composerMode: NativeComposerMode = .idle
     @State private var emojiPage = 0
     @State private var hasScrolledToLatest = false
     @State private var pendingScrollTask: Task<Void, Never>?
@@ -274,8 +282,8 @@ private struct NativeMessageThreadView: View {
     @FocusState private var composerFocused: Bool
 
     var body: some View {
-        VStack(spacing: 0) {
-            messageHistory
+        messageHistory
+        .safeAreaInset(edge: .bottom, spacing: 0) {
             if conversation.canSend { composer }
         }
         .navigationTitle(conversation.displayLabel)
@@ -287,14 +295,6 @@ private struct NativeMessageThreadView: View {
                     Text(conversation.presence.onlineCount > 0 ? "Online" : "Offline")
                         .font(.caption2)
                         .foregroundColor(.secondary)
-                }
-            }
-            ToolbarItemGroup(placement: .keyboard) {
-                Spacer()
-                Button {
-                    composerFocused = false
-                } label: {
-                    Label("Hide Keyboard", systemImage: "keyboard.chevron.compact.down")
                 }
             }
         }
@@ -341,13 +341,22 @@ private struct NativeMessageThreadView: View {
             .opacity(messages.isEmpty || hasScrolledToLatest ? 1 : 0)
             .background(Color(.systemGroupedBackground))
             .onTapGesture {
-                composerFocused = false
-                closeEmojiPicker()
+                dismissComposer()
             }
             .onAppear { scrollToLatest(using: proxy) }
             .onChange(of: messages.last?.id) { _ in scrollToLatest(using: proxy) }
             .onChange(of: composerFocused) { focused in
-                if focused { keepLatestVisibleAboveKeyboard(using: proxy) }
+                if focused {
+                    composerMode = .keyboard
+                    keepLatestVisibleAfterComposerChange(using: proxy)
+                } else if composerMode == .keyboard {
+                    composerMode = .idle
+                }
+            }
+            .onChange(of: composerMode) { mode in
+                if mode == .emoji || mode == .more || mode == .voice {
+                    keepLatestVisibleAfterComposerChange(using: proxy)
+                }
             }
             .onDisappear {
                 pendingScrollTask?.cancel()
@@ -382,56 +391,137 @@ private struct NativeMessageThreadView: View {
                 }
                 Divider()
             }
-            if quickEmojisVisible {
+            Divider()
+            HStack(alignment: .bottom, spacing: 8) {
+                Button {
+                    toggleVoiceComposer()
+                } label: {
+                    Image(systemName: composerMode == .voice ? "keyboard" : "waveform.circle")
+                        .font(.system(size: 27))
+                        .frame(width: 36, height: 40)
+                }
+                .foregroundColor(.primary)
+                .accessibilityLabel(composerMode == .voice ? "Show keyboard" : "Record a voice message")
+
+                if composerMode == .voice {
+                    NativeVoiceRecordButton(
+                        recorder: recorder,
+                        onBegan: {},
+                        onFinished: sendVoice
+                    )
+                    .layoutPriority(1)
+                } else {
+                    HStack(spacing: 6) {
+                        TextField("Write a message", text: $draft)
+                            .focused($composerFocused)
+                            .submitLabel(.send)
+                            .onSubmit { sendText() }
+                            .onTapGesture { composerMode = .keyboard }
+                        Button {
+                            toggleVoiceComposer()
+                        } label: {
+                            Image(systemName: "mic.fill")
+                                .foregroundColor(.secondary)
+                                .frame(width: 28, height: 28)
+                        }
+                        .accessibilityLabel("Record a voice message")
+                    }
+                    .padding(.leading, 11)
+                    .padding(.trailing, 6)
+                    .frame(minHeight: 40)
+                    .background(Color(.systemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .layoutPriority(1)
+                }
+
+                Button {
+                    toggleEmojiPicker()
+                } label: {
+                    Image(systemName: composerMode == .emoji ? "face.smiling.fill" : "face.smiling")
+                        .font(.system(size: 27))
+                        .frame(width: 36, height: 40)
+                }
+                .foregroundColor(.primary)
+                .accessibilityLabel(composerMode == .emoji ? "Show keyboard" : "Show emojis")
+
+                Button {
+                    toggleMorePanel()
+                } label: {
+                    Image(systemName: composerMode == .more ? "xmark.circle" : "plus.circle")
+                        .font(.system(size: 27))
+                        .frame(width: 36, height: 40)
+                }
+                .foregroundColor(.primary)
+                .accessibilityLabel(composerMode == .more ? "Hide more actions" : "Show more actions")
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 8)
+
+            if composerMode == .emoji {
+                Divider()
                 NativePagedEmojiPicker(
                     selectedPage: $emojiPage,
                     onSelect: { draft += $0 },
                     onClose: closeEmojiPicker
                 )
-            }
-            HStack(alignment: .bottom, spacing: 7) {
-                TextField("Write a message", text: $draft)
-                    .focused($composerFocused)
-                    .submitLabel(.send)
-                    .onSubmit { sendText() }
-                    .textFieldStyle(.roundedBorder)
-                    .onChange(of: composerFocused) { focused in
-                        guard focused, quickEmojisVisible else { return }
-                        closeEmojiPicker()
+            } else if composerMode == .more {
+                Divider()
+                NativeMessageMorePanel(
+                    showsMention: conversation.kind == "family",
+                    onMention: beginMention,
+                    onVoice: {
+                        composerFocused = false
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            composerMode = .voice
+                        }
                     }
-                Button {
-                    let willShow = !quickEmojisVisible
-                    if willShow { composerFocused = false }
-                    withAnimation(.easeInOut(duration: 0.16)) {
-                        quickEmojisVisible = willShow
-                    }
-                } label: {
-                    Image(systemName: quickEmojisVisible ? "face.smiling.fill" : "face.smiling")
-                        .frame(width: 36, height: 36)
-                }
-                .accessibilityLabel(quickEmojisVisible ? "Hide emojis" : "Show emojis")
-                if conversation.kind == "family" {
-                    Button {
-                        closeEmojiPicker()
-                        if !draft.hasSuffix(" ") && !draft.isEmpty { draft += " " }
-                        draft += "@"
-                        composerFocused = true
-                    } label: {
-                        Image(systemName: "at")
-                            .frame(width: 36, height: 36)
-                    }
-                    .accessibilityLabel("Mention a family member")
-                }
-                NativeVoiceRecordButton(
-                    recorder: recorder,
-                    onBegan: closeEmojiPicker,
-                    onFinished: sendVoice
                 )
             }
-            .padding(.horizontal, 9)
-            .padding(.top, 8)
-            .padding(.bottom, 8)
-            .background(Color(.secondarySystemBackground))
+        }
+        .background(Color(.systemGray6))
+    }
+
+    private func beginMention() {
+        if !draft.hasSuffix(" ") && !draft.isEmpty { draft += " " }
+        draft += "@"
+        composerMode = .keyboard
+        DispatchQueue.main.async { composerFocused = true }
+    }
+
+    private func toggleVoiceComposer() {
+        let showKeyboard = composerMode == .voice
+        composerFocused = false
+        withAnimation(.easeInOut(duration: 0.16)) {
+            composerMode = showKeyboard ? .keyboard : .voice
+        }
+        if showKeyboard {
+            DispatchQueue.main.async { composerFocused = true }
+        }
+    }
+
+    private func toggleEmojiPicker() {
+        let showKeyboard = composerMode == .emoji
+        composerFocused = false
+        withAnimation(.easeInOut(duration: 0.16)) {
+            composerMode = showKeyboard ? .keyboard : .emoji
+        }
+        if showKeyboard {
+            DispatchQueue.main.async { composerFocused = true }
+        }
+    }
+
+    private func toggleMorePanel() {
+        composerFocused = false
+        withAnimation(.easeInOut(duration: 0.16)) {
+            composerMode = composerMode == .more ? .idle : .more
+        }
+    }
+
+    private func dismissComposer() {
+        composerFocused = false
+        guard composerMode != .voice else { return }
+        withAnimation(.easeInOut(duration: 0.16)) {
+            composerMode = .idle
         }
     }
 
@@ -447,13 +537,14 @@ private struct NativeMessageThreadView: View {
         guard let marker = draft.lastIndex(of: "@") else { return }
         draft.replaceSubrange(marker..., with: "@\(member.label) ")
         if !selectedMentions.contains(member.actor) { selectedMentions.append(member.actor) }
+        composerMode = .keyboard
         composerFocused = true
     }
 
     private func closeEmojiPicker() {
-        guard quickEmojisVisible else { return }
+        guard composerMode == .emoji else { return }
         withAnimation(.easeInOut(duration: 0.16)) {
-            quickEmojisVisible = false
+            composerMode = .idle
         }
     }
 
@@ -494,7 +585,7 @@ private struct NativeMessageThreadView: View {
         }
     }
 
-    private func keepLatestVisibleAboveKeyboard(using proxy: ScrollViewProxy) {
+    private func keepLatestVisibleAfterComposerChange(using proxy: ScrollViewProxy) {
         guard !messages.isEmpty else { return }
         keyboardScrollTask?.cancel()
         keyboardScrollTask = Task { @MainActor in
@@ -505,10 +596,10 @@ private struct NativeMessageThreadView: View {
                 proxy.scrollTo("native-message-bottom", anchor: .bottom)
             }
 
-            // Calibrate once after the keyboard's safe-area animation has
-            // completed so the final bubble cannot remain under the composer.
+            // Calibrate after the keyboard or custom panel animation has
+            // completed so the final bubble stays above the composer.
             try? await Task.sleep(nanoseconds: 320_000_000)
-            guard !Task.isCancelled, composerFocused else { return }
+            guard !Task.isCancelled else { return }
             var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction) {
@@ -608,6 +699,62 @@ private struct NativeMessageThreadView: View {
                 sendError = error.localizedDescription
             }
         }
+    }
+}
+
+private struct NativeMessageMorePanel: View {
+    let showsMention: Bool
+    let onMention: () -> Void
+    let onVoice: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 24) {
+            if showsMention {
+                NativeMessageMoreAction(
+                    title: "Mention",
+                    systemImage: "at",
+                    action: onMention
+                )
+            }
+            NativeMessageMoreAction(
+                title: "Voice",
+                systemImage: "mic.fill",
+                action: onVoice
+            )
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 18)
+        .padding(.bottom, 22)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.systemGroupedBackground))
+    }
+}
+
+private struct NativeMessageMoreAction: View {
+    let title: String
+    let systemImage: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 7) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 24, weight: .regular))
+                    .foregroundColor(.primary)
+                    .frame(width: 58, height: 58)
+                    .background(Color(.systemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(Color(.separator).opacity(0.55), lineWidth: 0.5)
+                    }
+                Text(title)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -951,10 +1098,16 @@ private struct NativeVoiceRecordButton: View {
     @State private var holding = false
 
     var body: some View {
-        Image(systemName: recorder.isRecording ? "waveform.circle.fill" : "mic.circle")
-            .font(.system(size: 27))
-            .foregroundColor(recorder.isRecording ? .red : .secondary)
-            .frame(width: 38, height: 38)
+        Text(recorder.isRecording ? "Release to Send" : "Hold to Talk")
+            .font(.system(size: 16, weight: .medium))
+            .foregroundColor(recorder.isRecording ? .red : .primary)
+            .frame(maxWidth: .infinity, minHeight: 40)
+            .background(recorder.isRecording || holding ? Color(.systemGray5) : Color(.systemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(Color(.separator).opacity(0.55), lineWidth: 0.5)
+            }
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
@@ -973,5 +1126,6 @@ private struct NativeVoiceRecordButton: View {
                     }
             )
             .accessibilityLabel("Hold to record a voice message")
+            .accessibilityValue(recorder.isRecording ? "Recording" : "Ready")
     }
 }
