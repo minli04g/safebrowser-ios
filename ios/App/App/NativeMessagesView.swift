@@ -1,5 +1,6 @@
 import AVFoundation
 import SwiftUI
+import UIKit
 
 @MainActor
 final class NativeMessageStore: ObservableObject {
@@ -300,6 +301,95 @@ private struct NativeDisplayMessage: Identifiable, Equatable {
     var delivery: NativeDeliveryState
 }
 
+private final class NativeKeyboardEdgeAccessoryView: UIView {
+    override var intrinsicContentSize: CGSize {
+        CGSize(width: UIView.noIntrinsicMetric, height: 1)
+    }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .systemGray5
+        isUserInteractionEnabled = false
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+}
+
+private struct NativeMessageTextField: UIViewRepresentable {
+    @Binding var text: String
+    @Binding var isFocused: Bool
+    let onSubmit: () -> Void
+    let onBeganEditing: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeUIView(context: Context) -> UITextField {
+        let textField = UITextField(frame: .zero)
+        textField.delegate = context.coordinator
+        textField.placeholder = "Write a message"
+        textField.returnKeyType = .send
+        textField.enablesReturnKeyAutomatically = true
+        textField.autocorrectionType = .yes
+        textField.borderStyle = .none
+        textField.backgroundColor = .clear
+        textField.font = .preferredFont(forTextStyle: .body)
+        textField.adjustsFontForContentSizeCategory = true
+        textField.inputAccessoryView = NativeKeyboardEdgeAccessoryView(frame: .zero)
+        textField.addTarget(
+            context.coordinator,
+            action: #selector(Coordinator.textDidChange(_:)),
+            for: .editingChanged
+        )
+        return textField
+    }
+
+    func updateUIView(_ textField: UITextField, context: Context) {
+        context.coordinator.parent = self
+        if textField.markedTextRange == nil, textField.text != text {
+            textField.text = text
+        }
+
+        if isFocused, !textField.isFirstResponder {
+            DispatchQueue.main.async {
+                guard isFocused else { return }
+                textField.becomeFirstResponder()
+            }
+        } else if !isFocused, textField.isFirstResponder {
+            textField.resignFirstResponder()
+        }
+    }
+
+    final class Coordinator: NSObject, UITextFieldDelegate {
+        var parent: NativeMessageTextField
+
+        init(parent: NativeMessageTextField) {
+            self.parent = parent
+        }
+
+        @objc func textDidChange(_ textField: UITextField) {
+            parent.text = textField.text ?? ""
+        }
+
+        func textFieldDidBeginEditing(_ textField: UITextField) {
+            if !parent.isFocused { parent.isFocused = true }
+            parent.onBeganEditing()
+        }
+
+        func textFieldDidEndEditing(_ textField: UITextField) {
+            if parent.isFocused { parent.isFocused = false }
+        }
+
+        func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+            parent.onSubmit()
+            return false
+        }
+    }
+}
+
 private enum NativeComposerMode: Equatable {
     case idle
     case keyboard
@@ -324,7 +414,7 @@ private struct NativeMessageThreadView: View {
     @State private var pendingScrollTask: Task<Void, Never>?
     @State private var keyboardScrollTask: Task<Void, Never>?
     @StateObject private var recorder = NativeVoiceRecorder()
-    @FocusState private var composerFocused: Bool
+    @State private var composerFocused = false
 
     var body: some View {
         ZStack {
@@ -460,11 +550,13 @@ private struct NativeMessageThreadView: View {
                     .layoutPriority(1)
                 } else {
                     HStack(spacing: 6) {
-                        TextField("Write a message", text: $draft)
-                            .focused($composerFocused)
-                            .submitLabel(.send)
-                            .onSubmit { sendText() }
-                            .onTapGesture { composerMode = .keyboard }
+                        NativeMessageTextField(
+                            text: $draft,
+                            isFocused: $composerFocused,
+                            onSubmit: sendText,
+                            onBeganEditing: { composerMode = .keyboard }
+                        )
+                        .frame(maxWidth: .infinity, minHeight: 32)
                         Button {
                             toggleVoiceComposer()
                         } label: {
