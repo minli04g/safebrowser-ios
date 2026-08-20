@@ -9,7 +9,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
     var window: UIWindow?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        // Override point for customization after application launch.
+        DispatchQueue.main.async { [weak self] in
+            self?.installNativeShellIfNeeded()
+        }
         return true
     }
 
@@ -57,7 +59,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
         let hex = deviceToken.map { String(format: "%02x", $0) }.joined()
         DispatchQueue.main.async {
             let js = "window.__sbApnsToken && window.__sbApnsToken('\(hex)')"
-            (self.window?.rootViewController as? CAPBridgeViewController)?.webView?.evaluateJavaScript(js, completionHandler: nil)
+            if let nativeShell = self.nativeShell {
+                nativeShell.evaluateJavaScript(js)
+            } else {
+                self.bridgeViewController?.webView?.evaluateJavaScript(js, completionHandler: nil)
+            }
         }
     }
 
@@ -81,7 +87,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
         // apns2 puts custom `data` at the payload root. Message taps take
         // precedence when both identifiers are present.
         if let conversationId = userInfo["conversationId"] as? String, !conversationId.isEmpty {
-            openMessageInWebView(conversationId)
+            openNativeMessage(conversationId)
         } else if let requestId = userInfo["requestId"] as? String, !requestId.isEmpty {
             openRequestInWebView(requestId)
         }
@@ -92,16 +98,29 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
     // the dashboard has defined the global — covers a cold
     // launch from a tap, where the page hasn't finished loading yet.
     private func openRequestInWebView(_ requestId: String, attemptsLeft: Int = 30) {
+        if let nativeShell {
+            nativeShell.openRequestInWebView(requestId)
+            return
+        }
         openIdentifierInWebView(requestId, global: "__sbOpenRequest", attemptsLeft: attemptsLeft)
     }
 
-    private func openMessageInWebView(_ conversationId: String, attemptsLeft: Int = 30) {
-        openIdentifierInWebView(conversationId, global: "__sbOpenMessage", attemptsLeft: attemptsLeft)
+    private func openNativeMessage(_ conversationId: String, attemptsLeft: Int = 30) {
+        DispatchQueue.main.async {
+            if let nativeShell = self.nativeShell {
+                nativeShell.openMessage(conversationId)
+            } else if attemptsLeft > 0 {
+                self.installNativeShellIfNeeded()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self.openNativeMessage(conversationId, attemptsLeft: attemptsLeft - 1)
+                }
+            }
+        }
     }
 
     private func openIdentifierInWebView(_ identifier: String, global: String, attemptsLeft: Int) {
         DispatchQueue.main.async {
-            guard let webView = (self.window?.rootViewController as? CAPBridgeViewController)?.webView else {
+            guard let webView = self.nativeShell?.webView ?? self.bridgeViewController?.webView else {
                 if attemptsLeft > 0 {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                         self.openIdentifierInWebView(identifier, global: global, attemptsLeft: attemptsLeft - 1)
@@ -122,6 +141,36 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
                 }
             }
         }
+    }
+
+    private var nativeShell: NativeShellViewController? {
+        window?.rootViewController as? NativeShellViewController
+    }
+
+    private var bridgeViewController: CAPBridgeViewController? {
+        window?.rootViewController as? CAPBridgeViewController
+    }
+
+    private func installNativeShellIfNeeded(attemptsLeft: Int = 30) {
+        guard nativeShell == nil else { return }
+        guard let bridgeViewController else {
+            if attemptsLeft > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                    self?.installNativeShellIfNeeded(attemptsLeft: attemptsLeft - 1)
+                }
+            }
+            return
+        }
+        guard let shell = NativeShellViewController(bridgeViewController: bridgeViewController) else {
+            if attemptsLeft > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                    self?.installNativeShellIfNeeded(attemptsLeft: attemptsLeft - 1)
+                }
+            }
+            return
+        }
+        window?.rootViewController = shell
+        window?.makeKeyAndVisible()
     }
 
 }

@@ -1,19 +1,24 @@
 # safebrowser-ios
 
-Thin [Capacitor](https://capacitorjs.com/) iOS shell for the **SafeBrowser** parent console.
+Native iOS shell for the **SafeBrowser** parent console, built with Capacitor,
+UIKit, and SwiftUI.
 
-The app is a WKWebView that loads the remote parent dashboard and registers for
-APNs push so a parent is alerted when a child submits an access request. It
-contains no application logic of its own — everything is served from the
-dashboard at runtime.
+The management console remains a remotely loaded WKWebView. Messages use native
+SwiftUI screens so keyboard handling, navigation, recording, and message-list
+performance follow standard iOS behavior.
 
 ## How it works
 
 - `capacitor.config.ts` points `server.url` at the deployed dashboard; the
   WebView loads it directly.
+- `NativeShellViewController` keeps the management WebView alive while switching
+  between Manage, three configurable management shortcuts, and native Messages.
+- The SwiftUI message client reuses the authenticated WKWebView cookie store for
+  REST and WebSocket calls. Opening a conversation marks it read; merely viewing
+  the conversation list does not.
 - `@capacitor/push-notifications` registers the device's APNs token (the
-  dashboard's bundled bridge code POSTs it to the server) and deep-links a
-  tapped notification to the pending-request screen.
+  dashboard's bundled bridge code POSTs it to the server). Request notifications
+  deep-link into management; message notifications open the native conversation.
 - Push entitlement: `aps-environment = production` (TestFlight uses production APNs).
 
 ## Build & release
