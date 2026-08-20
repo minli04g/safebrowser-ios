@@ -34,6 +34,11 @@ struct NativeAccessRequest: Codable, Identifiable, Hashable {
     let target: String?
     let targetLabel: String?
     let videoTitle: String?
+    let videoOwnerName: String?
+    let videoAiRating: String?
+    let videoEffectiveRating: String?
+    let videoAiReason: String?
+    let timeZone: String?
     let targetUsageTodayMs: Double?
     let createdAt: Double
     let staleAt: Double
@@ -278,6 +283,7 @@ struct NativeManageRootView: View {
                         ForEach(store.requests) { request in
                             NativeRequestSummaryCard(
                                 request: request,
+                                api: store.api,
                                 isFocused: store.focusRequestId == request.id,
                                 isWorking: store.actionRequestId == request.id,
                                 onApprove: { minutes in Task { await store.approve(request, minutes: minutes) } },
@@ -542,8 +548,89 @@ private struct NativeSelectAllNumberField: UIViewRepresentable {
     }
 }
 
+private struct NativeBilibiliRequestCover: View {
+    let api: NativeMessageAPI
+    let deviceId: String
+    let bvid: String?
+    @State private var image: UIImage?
+
+    var body: some View {
+        ZStack {
+            Color(.secondarySystemBackground)
+            Image(systemName: "play.rectangle.fill")
+                .font(.title2)
+                .foregroundColor(.secondary)
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            }
+        }
+        .frame(width: 112, height: 64)
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .task(id: bvid) {
+            image = nil
+            guard let bvid, !bvid.isEmpty else { return }
+            guard
+                let data = try? await api.bilibiliCoverData(deviceId: deviceId, bvid: bvid),
+                !Task.isCancelled
+            else { return }
+            image = UIImage(data: data)
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+private struct NativeVideoRatingMetric: View {
+    let label: String
+    let rating: String?
+    let presentsAsBadge: Bool
+
+    private var value: String { rating ?? "Unavailable" }
+
+    private var tone: Color {
+        switch rating {
+        case "不适合": return Color(.systemRed)
+        case "需家长陪同": return Color(.systemOrange)
+        case "适合儿童": return Color(.systemGreen)
+        default: return .secondary
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(label)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.secondary)
+                .tracking(0.4)
+
+            if presentsAsBadge {
+                Text(value)
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(tone)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
+                    .background(tone.opacity(0.11))
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            } else {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(tone)
+                        .frame(width: 7, height: 7)
+                    Text(value)
+                        .font(.caption)
+                        .foregroundColor(.primary)
+                }
+                .frame(minHeight: 24)
+            }
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+}
+
 private struct NativeRequestSummaryCard: View {
     let request: NativeAccessRequest
+    let api: NativeMessageAPI
     let isFocused: Bool
     let isWorking: Bool
     let onApprove: (Int) -> Void
@@ -665,13 +752,47 @@ private struct NativeRequestSummaryCard: View {
                     .lineLimit(3)
             }
         } else if request.kind == "allow-video" {
-            VStack(alignment: .leading, spacing: 5) {
-                Text("VIDEO REQUEST")
-                    .font(.caption2.weight(.bold))
-                    .foregroundColor(.secondary)
-                Text(request.videoTitle ?? request.target ?? "Bilibili video")
-                    .font(.headline)
-                Text("Access expires at midnight on the child device.")
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
+                    NativeBilibiliRequestCover(
+                        api: api,
+                        deviceId: request.deviceId,
+                        bvid: request.target
+                    )
+
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(request.videoTitle ?? request.target ?? "Bilibili video")
+                            .font(.headline)
+                            .lineLimit(2)
+                        Text("\(request.videoOwnerName ?? "Unknown uploader") · \(request.target ?? "Unknown BVID")")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                HStack(alignment: .top, spacing: 22) {
+                    NativeVideoRatingMetric(
+                        label: "AI RATING",
+                        rating: request.videoAiRating,
+                        presentsAsBadge: false
+                    )
+                    NativeVideoRatingMetric(
+                        label: "EFFECTIVE RATING",
+                        rating: request.videoEffectiveRating,
+                        presentsAsBadge: true
+                    )
+                }
+
+                if let reason = request.videoAiReason, !reason.isEmpty {
+                    Text(reason)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Text(videoExpiryText)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -688,6 +809,11 @@ private struct NativeRequestSummaryCard: View {
 
     private var requestNeedsDuration: Bool {
         request.kind != "allow-download" && request.kind != "allow-video"
+    }
+
+    private var videoExpiryText: String {
+        let suffix = request.timeZone.map { " (\($0))" } ?? ""
+        return "Access expires at midnight on the child device\(suffix)."
     }
 
     private var approveLabel: String {

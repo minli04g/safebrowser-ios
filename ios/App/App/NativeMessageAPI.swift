@@ -67,6 +67,12 @@ final class NativeMessageAPI {
         )
     }
 
+    func bilibiliCoverData(deviceId: String, bvid: String) async throws -> Data {
+        try await requestData(
+            path: "/v1/devices/\(encodePath(deviceId))/content/bilibili/\(encodePath(bvid))/cover"
+        )
+    }
+
     func listMessages(conversationId: String, before: String? = nil) async throws -> NativeMessagesResponse {
         var path = "/v1/messages/conversations/\(encodePath(conversationId))/messages"
         if let before, !before.isEmpty {
