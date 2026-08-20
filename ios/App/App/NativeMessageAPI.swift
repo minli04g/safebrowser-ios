@@ -40,6 +40,33 @@ final class NativeMessageAPI {
         return response.conversations
     }
 
+    func listDevices() async throws -> [NativeDeviceSummary] {
+        let response: NativeDevicesResponse = try await request(path: "/v1/devices")
+        return response.devices
+    }
+
+    func listPendingRequests() async throws -> [NativeAccessRequest] {
+        let response: NativePendingRequestsResponse = try await request(path: "/v1/requests?status=pending")
+        return response.requests
+    }
+
+    func approveRequest(deviceId: String, requestId: String, minutes: Int) async throws -> Int {
+        let body = NativeApproveRequestBody(minutes: minutes)
+        let response: NativeApproveRequestResponse = try await request(
+            path: "/v1/devices/\(encodePath(deviceId))/requests/\(encodePath(requestId))/approve",
+            method: "POST",
+            body: try encoder.encode(body)
+        )
+        return response.effectiveMinutes
+    }
+
+    func rejectRequest(deviceId: String, requestId: String) async throws {
+        _ = try await requestData(
+            path: "/v1/devices/\(encodePath(deviceId))/requests/\(encodePath(requestId))/reject",
+            method: "POST"
+        )
+    }
+
     func listMessages(conversationId: String, before: String? = nil) async throws -> NativeMessagesResponse {
         var path = "/v1/messages/conversations/\(encodePath(conversationId))/messages"
         if let before, !before.isEmpty {

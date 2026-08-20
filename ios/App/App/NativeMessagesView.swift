@@ -9,6 +9,8 @@ final class NativeMessageStore: ObservableObject {
     @Published var selectedConversationId: String?
     @Published private(set) var changeVersion = 0
     @Published private(set) var changedConversationId: String?
+    @Published private(set) var parentEventVersion = 0
+    @Published private(set) var lastParentEventType: String?
 
     let api: NativeMessageAPI
     private var started = false
@@ -47,6 +49,7 @@ final class NativeMessageStore: ObservableObject {
         conversations = []
         selectedConversationId = nil
         changedConversationId = nil
+        lastParentEventType = nil
         errorText = "Sign in from Manage to use Messages."
     }
 
@@ -103,6 +106,8 @@ final class NativeMessageStore: ObservableObject {
                     @unknown default: continue
                     }
                     guard let event = try? JSONDecoder().decode(NativeParentSocketEvent.self, from: data) else { continue }
+                    lastParentEventType = event.type
+                    parentEventVersion += 1
                     if event.type == "messages.changed" {
                         changedConversationId = event.conversationId
                         changeVersion += 1
@@ -260,6 +265,9 @@ private struct NativeMessageThreadView: View {
     @State private var draft = ""
     @State private var selectedMentions: [NativeMessageActor] = []
     @State private var sendError: String?
+    @State private var quickEmojisVisible = false
+    @State private var hasScrolledToLatest = false
+    @State private var pendingScrollTask: Task<Void, Never>?
     @StateObject private var recorder = NativeVoiceRecorder()
     @FocusState private var composerFocused: Bool
 
@@ -312,15 +320,19 @@ private struct NativeMessageThreadView: View {
                         }
                         NativeMessageBubble(message: message, api: store.api).id(message.id)
                     }
+                    Color.clear.frame(height: 1).id("native-message-bottom")
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 14)
             }
+            // Keep the first layout hidden until it has been positioned at the
+            // bottom. This prevents the thread from briefly painting at the
+            // top and visibly jumping when a conversation is opened.
+            .opacity(messages.isEmpty || hasScrolledToLatest ? 1 : 0)
             .background(Color(.systemGroupedBackground))
-            .onChange(of: messages.count) { _ in
-                guard let last = messages.last else { return }
-                withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo(last.id, anchor: .bottom) }
-            }
+            .onAppear { scrollToLatest(using: proxy) }
+            .onChange(of: messages.last?.id) { _ in scrollToLatest(using: proxy) }
+            .onDisappear { pendingScrollTask?.cancel() }
         }
     }
 
@@ -350,35 +362,56 @@ private struct NativeMessageThreadView: View {
                 }
                 Divider()
             }
+            if quickEmojisVisible {
+                Divider()
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(["😀", "😂", "🥰", "👍", "👏", "❤️", "🎉"], id: \.self) { emoji in
+                            Button {
+                                draft += emoji
+                                composerFocused = true
+                            } label: {
+                                Text(emoji)
+                                    .font(.title2)
+                                    .frame(width: 38, height: 38)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Insert \(emoji)")
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                }
+                .background(Color(.secondarySystemBackground))
+            }
             HStack(alignment: .bottom, spacing: 7) {
                 TextField("Write a message", text: $draft)
                     .focused($composerFocused)
                     .submitLabel(.send)
                     .onSubmit { sendText() }
                     .textFieldStyle(.roundedBorder)
-                Menu {
-                    ForEach(["😀", "😂", "🥰", "👍", "👏", "❤️", "🎉"], id: \.self) { emoji in
-                        Button(emoji) {
-                            draft += emoji
-                            DispatchQueue.main.async { composerFocused = true }
-                        }
-                    }
-                } label: {
-                    Image(systemName: "face.smiling")
-                        .frame(width: 36, height: 36)
-                }
-                .accessibilityLabel("Add an emoji")
                 Button {
-                    if !draft.hasSuffix(" ") && !draft.isEmpty { draft += " " }
-                    draft += "@"
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        quickEmojisVisible.toggle()
+                    }
                     composerFocused = true
                 } label: {
-                    Image(systemName: "at")
+                    Image(systemName: quickEmojisVisible ? "face.smiling.fill" : "face.smiling")
                         .frame(width: 36, height: 36)
                 }
-                .accessibilityLabel("Mention a family member")
-                .opacity(conversation.kind == "family" ? 1 : 0)
-                .disabled(conversation.kind != "family")
+                .accessibilityLabel(quickEmojisVisible ? "Hide emojis" : "Show emojis")
+                if conversation.kind == "family" {
+                    Button {
+                        if !draft.hasSuffix(" ") && !draft.isEmpty { draft += " " }
+                        draft += "@"
+                        composerFocused = true
+                    } label: {
+                        Image(systemName: "at")
+                            .frame(width: 36, height: 36)
+                    }
+                    .accessibilityLabel("Mention a family member")
+                }
                 NativeVoiceRecordButton(recorder: recorder) { capture in
                     sendVoice(capture)
                 }
@@ -409,6 +442,37 @@ private struct NativeMessageThreadView: View {
         guard messages.indices.contains(index) else { return false }
         guard index > 0 else { return true }
         return messages[index].record.date.timeIntervalSince(messages[index - 1].record.date) >= 5 * 60
+    }
+
+    private func scrollToLatest(using proxy: ScrollViewProxy) {
+        guard !messages.isEmpty else { return }
+        pendingScrollTask?.cancel()
+        let animated = hasScrolledToLatest
+        pendingScrollTask = Task { @MainActor in
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            guard !Task.isCancelled else { return }
+            if animated {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    proxy.scrollTo("native-message-bottom", anchor: .bottom)
+                }
+            } else {
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    proxy.scrollTo("native-message-bottom", anchor: .bottom)
+                }
+                // SwiftUI can need one more layout pass after an async message
+                // load before the final content height is known.
+                await Task.yield()
+                try? await Task.sleep(nanoseconds: 16_000_000)
+                guard !Task.isCancelled else { return }
+                withTransaction(transaction) {
+                    proxy.scrollTo("native-message-bottom", anchor: .bottom)
+                    hasScrolledToLatest = true
+                }
+            }
+        }
     }
 
     private func loadMessages() async {
@@ -554,22 +618,24 @@ private struct NativeMessageBubble: View {
     }
 }
 
-private struct NativeAvatar: View {
+struct NativeAvatar: View {
     let url: URL?
     let label: String
     let size: CGFloat
+    @StateObject private var loader = NativeAvatarLoader()
 
     var body: some View {
-        AsyncImage(url: url) { image in
-            image.resizable().scaledToFill()
-        } placeholder: {
-            ZStack {
-                Color.accentColor.opacity(0.12)
-                Text(String(label.prefix(1)).uppercased()).font(.caption.weight(.medium))
+        ZStack {
+            Color.accentColor.opacity(0.12)
+            Text(String(label.prefix(1)).uppercased()).font(.caption.weight(.medium))
+            if let image = loader.image {
+                Image(uiImage: image).resizable().scaledToFill()
             }
         }
         .frame(width: size, height: size)
         .clipShape(Circle())
+        .onAppear { loader.load(url) }
+        .onChange(of: url) { loader.load($0) }
     }
 }
 

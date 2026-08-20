@@ -52,10 +52,13 @@ final class NativeShellViewController: UIViewController, UITabBarDelegate, WKScr
     let bridgeViewController: CAPBridgeViewController
 
     private let webContainer = UIView()
+    private let manageContainer = UIView()
     private let messagesContainer = UIView()
     private let tabBar = UITabBar()
     private let messageStore: NativeMessageStore
+    private let manageStore: NativeManageStore
     private let messagesViewController: UIHostingController<NativeMessagesRootView>
+    private let manageViewController: UIHostingController<NativeManageRootView>
     private var tabBarHeightConstraint: NSLayoutConstraint?
     private var shortcuts = NativeManagementShortcut.fallback
     private var currentDeviceId: String?
@@ -71,17 +74,31 @@ final class NativeShellViewController: UIViewController, UITabBarDelegate, WKScr
         else { return nil }
 
         let messageStore = NativeMessageStore(api: api)
+        let manageStore = NativeManageStore(api: api)
         self.bridgeViewController = bridgeViewController
         self.messageStore = messageStore
+        self.manageStore = manageStore
         self.messagesViewController = UIHostingController(rootView: NativeMessagesRootView(
             store: messageStore,
             onOpenManage: {}
+        ))
+        self.manageViewController = UIHostingController(rootView: NativeManageRootView(
+            store: manageStore,
+            onOpenDevice: { _ in },
+            onOpenAccount: {},
+            onOpenSignIn: {}
         ))
         super.init(nibName: nil, bundle: nil)
 
         messagesViewController.rootView = NativeMessagesRootView(store: messageStore) { [weak self] in
             self?.selectManage()
         }
+        manageViewController.rootView = NativeManageRootView(
+            store: manageStore,
+            onOpenDevice: { [weak self] deviceId in self?.openDevice(deviceId) },
+            onOpenAccount: { [weak self] in self?.openWebRoute("/account") },
+            onOpenSignIn: { [weak self] in self?.openWebRoute("/login") }
+        )
         webView.configuration.userContentController.add(self, name: "safeBrowserShell")
 
         let nativeMarker = WKUserScript(
@@ -107,7 +124,8 @@ final class NativeShellViewController: UIViewController, UITabBarDelegate, WKScr
         configureTabBar()
         observeMessages()
         messageStore.start()
-        showWebContent()
+        manageStore.start()
+        showManageSummary()
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -123,15 +141,16 @@ final class NativeShellViewController: UIViewController, UITabBarDelegate, WKScr
     func openMessage(_ conversationId: String?) {
         messageStore.start()
         if let conversationId, !conversationId.isEmpty {
+            rememberDeviceFromConversation(conversationId)
             messageStore.openConversation(conversationId)
         }
         showMessages()
         tabBar.selectedItem = tabBar.items?.first(where: { $0.tag == NativeShellTab.messages.rawValue })
     }
 
-    func openRequestInWebView(_ requestId: String) {
+    func openRequest(_ requestId: String) {
+        manageStore.focusRequest(requestId)
         selectManage()
-        deliverIdentifierToWebView(requestId, global: "__sbOpenRequest")
     }
 
     func evaluateJavaScript(_ source: String, completionHandler: ((Any?, Error?) -> Void)? = nil) {
@@ -145,11 +164,19 @@ final class NativeShellViewController: UIViewController, UITabBarDelegate, WKScr
             applyWebState(payload)
         case "openMessages":
             openMessage(payload["conversationId"] as? String)
+        case "openManage":
+            if let requestId = payload["requestId"] as? String, !requestId.isEmpty {
+                openRequest(requestId)
+            } else {
+                selectManage()
+            }
         case "auth":
             if (payload["signedIn"] as? Bool) == false {
                 messageStore.signOut()
+                manageStore.signOut()
             } else {
                 messageStore.signIn()
+                manageStore.signIn()
             }
         default:
             break
@@ -160,7 +187,7 @@ final class NativeShellViewController: UIViewController, UITabBarDelegate, WKScr
         guard let destination = NativeShellTab(rawValue: item.tag) else { return }
         switch destination {
         case .manage:
-            showWebContent()
+            showManageSummary()
         case .messages:
             openMessage(nil)
         case .shortcutOne, .shortcutTwo, .shortcutThree:
@@ -174,9 +201,11 @@ final class NativeShellViewController: UIViewController, UITabBarDelegate, WKScr
 
     private func configureChildren() {
         webContainer.translatesAutoresizingMaskIntoConstraints = false
+        manageContainer.translatesAutoresizingMaskIntoConstraints = false
         messagesContainer.translatesAutoresizingMaskIntoConstraints = false
         tabBar.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(webContainer)
+        view.addSubview(manageContainer)
         view.addSubview(messagesContainer)
         view.addSubview(tabBar)
 
@@ -187,6 +216,10 @@ final class NativeShellViewController: UIViewController, UITabBarDelegate, WKScr
             webContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             webContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             webContainer.bottomAnchor.constraint(equalTo: tabBar.topAnchor),
+            manageContainer.topAnchor.constraint(equalTo: view.topAnchor),
+            manageContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            manageContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            manageContainer.bottomAnchor.constraint(equalTo: tabBar.topAnchor),
             messagesContainer.topAnchor.constraint(equalTo: view.topAnchor),
             messagesContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             messagesContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -198,6 +231,7 @@ final class NativeShellViewController: UIViewController, UITabBarDelegate, WKScr
         ])
 
         embed(bridgeViewController, in: webContainer)
+        embed(manageViewController, in: manageContainer)
         embed(messagesViewController, in: messagesContainer)
     }
 
@@ -249,6 +283,50 @@ final class NativeShellViewController: UIViewController, UITabBarDelegate, WKScr
                 item.badgeValue = count > 0 ? (count > 99 ? "99+" : String(count)) : nil
             }
             .store(in: &cancellables)
+
+        manageStore.$requests
+            .receive(on: RunLoop.main)
+            .sink { [weak self] requests in
+                guard let self, let item = self.tabBar.items?.first(where: { $0.tag == NativeShellTab.manage.rawValue }) else { return }
+                let count = requests.count
+                item.badgeValue = count > 0 ? (count > 99 ? "99+" : String(count)) : nil
+                if
+                    let focusRequestId = self.manageStore.focusRequestId,
+                    let request = requests.first(where: { $0.id == focusRequestId })
+                {
+                    self.rememberDevice(request.deviceId)
+                }
+            }
+            .store(in: &cancellables)
+
+        manageStore.$devices
+            .receive(on: RunLoop.main)
+            .sink { [weak self] devices in
+                guard let self, !devices.isEmpty else { return }
+                let savedDeviceId = UserDefaults.standard.string(forKey: "SafeBrowser.NativeShell.lastDeviceId")
+                if
+                    let candidate = self.currentDeviceId ?? savedDeviceId,
+                    devices.contains(where: { $0.id == candidate })
+                {
+                    self.currentDeviceId = candidate
+                } else if let firstDevice = devices.first {
+                    self.rememberDevice(firstDevice.id)
+                }
+            }
+            .store(in: &cancellables)
+
+        messageStore.$parentEventVersion
+            .dropFirst()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                if self.messageStore.lastParentEventType == "request.created" ||
+                    self.messageStore.lastParentEventType == "request.resolved" ||
+                    self.messageStore.lastParentEventType == "presence.changed"
+                {
+                    Task { await self.manageStore.refresh() }
+                }
+            }
+            .store(in: &cancellables)
     }
 
     private func applyWebState(_ payload: [String: Any]) {
@@ -267,7 +345,11 @@ final class NativeShellViewController: UIViewController, UITabBarDelegate, WKScr
             }
         }
 
-        guard messagesContainer.isHidden, let path = payload["path"] as? String else { return }
+        guard !webContainer.isHidden, let path = payload["path"] as? String else { return }
+        if path == "/" {
+            selectManage()
+            return
+        }
         if let index = shortcuts.firstIndex(where: { path.hasSuffix("/\($0.slug)") || path.contains("/\($0.slug)/") }) {
             tabBar.selectedItem = tabBar.items?.first(where: { $0.tag == NativeShellTab.shortcutOne.rawValue + index })
         } else {
@@ -276,47 +358,70 @@ final class NativeShellViewController: UIViewController, UITabBarDelegate, WKScr
     }
 
     private func openManagementShortcut(_ shortcut: NativeManagementShortcut) {
-        guard let deviceId = currentDeviceId ?? UserDefaults.standard.string(forKey: "SafeBrowser.NativeShell.lastDeviceId") else {
+        guard let deviceId = currentDeviceId
+            ?? UserDefaults.standard.string(forKey: "SafeBrowser.NativeShell.lastDeviceId")
+            ?? manageStore.devices.first?.id
+        else {
             selectManage()
             return
         }
-        showWebContent()
+        rememberDevice(deviceId)
         let path = "/devices/\(encodePathComponent(deviceId))/\(shortcut.slug)"
-        let escaped = path
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "'", with: "\\'")
-        let source = "window.history.pushState({}, '', '\(escaped)'); window.dispatchEvent(new PopStateEvent('popstate'));"
-        evaluateJavaScript(source)
+        openWebRoute(path)
     }
 
     private func selectManage() {
-        showWebContent()
+        showManageSummary()
         tabBar.selectedItem = tabBar.items?.first(where: { $0.tag == NativeShellTab.manage.rawValue })
+    }
+
+    private func openDevice(_ deviceId: String) {
+        rememberDevice(deviceId)
+        openManagementShortcut(shortcuts[0])
+    }
+
+    private func rememberDeviceFromConversation(_ conversationId: String) {
+        let prefix = "direct:parent:"
+        guard conversationId.hasPrefix(prefix) else { return }
+        let deviceId = String(conversationId.dropFirst(prefix.count))
+        if !deviceId.isEmpty { rememberDevice(deviceId) }
+    }
+
+    private func rememberDevice(_ deviceId: String) {
+        currentDeviceId = deviceId
+        UserDefaults.standard.set(deviceId, forKey: "SafeBrowser.NativeShell.lastDeviceId")
+    }
+
+    private func openWebRoute(_ path: String) {
+        showWebContent()
+        let escaped = path
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+        let source = "window.__sbNativeNavigate ? window.__sbNativeNavigate('\(escaped)') : window.location.assign('\(escaped)');"
+        evaluateJavaScript(source)
     }
 
     private func showWebContent() {
         messagesViewController.view.endEditing(true)
         webContainer.isHidden = false
+        manageContainer.isHidden = true
         messagesContainer.isHidden = true
+    }
+
+    private func showManageSummary() {
+        messagesViewController.view.endEditing(true)
+        bridgeViewController.view.endEditing(true)
+        webContainer.isHidden = true
+        manageContainer.isHidden = false
+        messagesContainer.isHidden = true
+        manageStore.start()
     }
 
     private func showMessages() {
         bridgeViewController.view.endEditing(true)
         webContainer.isHidden = true
+        manageContainer.isHidden = true
         messagesContainer.isHidden = false
-    }
-
-    private func deliverIdentifierToWebView(_ identifier: String, global: String, attemptsLeft: Int = 30) {
-        let escaped = identifier
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "'", with: "\\'")
-        let source = "(window.\(global) ? (window.\(global)('\(escaped)'), true) : false)"
-        evaluateJavaScript(source) { [weak self] result, _ in
-            guard !((result as? Bool) ?? false), attemptsLeft > 0 else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                self?.deliverIdentifierToWebView(identifier, global: global, attemptsLeft: attemptsLeft - 1)
-            }
-        }
     }
 
     private func encodePathComponent(_ value: String) -> String {

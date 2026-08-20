@@ -89,20 +89,22 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
         if let conversationId = userInfo["conversationId"] as? String, !conversationId.isEmpty {
             openNativeMessage(conversationId)
         } else if let requestId = userInfo["requestId"] as? String, !requestId.isEmpty {
-            openRequestInWebView(requestId)
+            openRequest(requestId)
         }
         completionHandler()
     }
 
-    // Call the dashboard deep-link global. Retries until the WebView exists and
-    // the dashboard has defined the global — covers a cold
-    // launch from a tap, where the page hasn't finished loading yet.
-    private func openRequestInWebView(_ requestId: String, attemptsLeft: Int = 30) {
-        if let nativeShell {
-            nativeShell.openRequestInWebView(requestId)
-            return
+    private func openRequest(_ requestId: String, attemptsLeft: Int = 30) {
+        DispatchQueue.main.async {
+            if let nativeShell = self.nativeShell {
+                nativeShell.openRequest(requestId)
+            } else if attemptsLeft > 0 {
+                self.installNativeShellIfNeeded()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self.openRequest(requestId, attemptsLeft: attemptsLeft - 1)
+                }
+            }
         }
-        openIdentifierInWebView(requestId, global: "__sbOpenRequest", attemptsLeft: attemptsLeft)
     }
 
     private func openNativeMessage(_ conversationId: String, attemptsLeft: Int = 30) {
@@ -113,31 +115,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
                 self.installNativeShellIfNeeded()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     self.openNativeMessage(conversationId, attemptsLeft: attemptsLeft - 1)
-                }
-            }
-        }
-    }
-
-    private func openIdentifierInWebView(_ identifier: String, global: String, attemptsLeft: Int) {
-        DispatchQueue.main.async {
-            guard let webView = self.nativeShell?.webView ?? self.bridgeViewController?.webView else {
-                if attemptsLeft > 0 {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        self.openIdentifierInWebView(identifier, global: global, attemptsLeft: attemptsLeft - 1)
-                    }
-                }
-                return
-            }
-            let escaped = identifier
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "'", with: "\\'")
-            let js = "(window.\(global) ? (window.\(global)('\(escaped)'), true) : false)"
-            webView.evaluateJavaScript(js) { result, _ in
-                let handled = (result as? Bool) ?? false
-                if !handled && attemptsLeft > 0 {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        self.openIdentifierInWebView(identifier, global: global, attemptsLeft: attemptsLeft - 1)
-                    }
                 }
             }
         }
