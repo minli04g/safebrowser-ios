@@ -7,10 +7,19 @@ struct NativeDeviceSummary: Codable, Identifiable, Hashable {
     let avatarUrl: String?
     let registeredAt: Double
     let lastSeenAt: Double?
+    let lastClientOs: String?
 
     var isOnline: Bool {
         guard let lastSeenAt else { return false }
         return Date().timeIntervalSince1970 * 1_000 - lastSeenAt < 120_000
+    }
+
+    var systemImage: String {
+        let platform = lastClientOs?.lowercased() ?? ""
+        if platform.contains("ios") || platform.contains("ipad") { return "ipad" }
+        if platform.contains("darwin") || platform.contains("mac") { return "laptopcomputer" }
+        if platform.contains("win") { return "pc" }
+        return "desktopcomputer"
     }
 }
 
@@ -24,6 +33,7 @@ struct NativeAccessRequest: Codable, Identifiable, Hashable {
     let target: String?
     let targetLabel: String?
     let videoTitle: String?
+    let targetUsageTodayMs: Double?
     let createdAt: Double
     let staleAt: Double
 
@@ -230,20 +240,33 @@ struct NativeManageRootView: View {
 
     private var summaryList: some View {
         ScrollViewReader { proxy in
-            List {
-                if let error = store.errorText {
-                    Section {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 22) {
+                    if let error = store.errorText {
                         Label(error, systemImage: "exclamationmark.triangle")
                             .foregroundColor(.red)
+                            .padding(14)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color(.systemBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
-                }
-                Section("Pending approvals") {
+
+                    NativeManageSectionHeader(
+                        title: "Pending approvals",
+                        count: store.requests.count,
+                        systemImage: "bell.badge"
+                    )
+
                     if store.requests.isEmpty {
                         Label("No pending requests", systemImage: "checkmark.circle")
                             .foregroundColor(.secondary)
+                            .padding(18)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color(.systemBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                     } else {
                         ForEach(store.requests) { request in
-                            NativeRequestSummaryRow(
+                            NativeRequestSummaryCard(
                                 request: request,
                                 isFocused: store.focusRequestId == request.id,
                                 isWorking: store.actionRequestId == request.id,
@@ -251,44 +274,32 @@ struct NativeManageRootView: View {
                                 onReject: { Task { await store.reject(request) } }
                             )
                             .id(request.id)
-                            .listRowBackground(
-                                store.focusRequestId == request.id
-                                    ? Color.accentColor.opacity(0.10)
-                                    : Color(.systemBackground)
-                            )
                         }
                     }
-                }
-                Section("Devices") {
-                    ForEach(store.devices) { device in
-                        Button { onOpenDevice(device.id) } label: {
-                            HStack(spacing: 12) {
-                                ZStack(alignment: .bottomTrailing) {
-                                    NativeAvatar(
-                                        url: store.api.absoluteURL(device.avatarUrl),
-                                        label: device.avatarLabel ?? device.name,
-                                        size: 42
-                                    )
-                                    Circle()
-                                        .fill(device.isOnline ? Color.green : Color(.systemGray4))
-                                        .frame(width: 11, height: 11)
-                                        .overlay(Circle().stroke(Color(.systemBackground), lineWidth: 2))
-                                }
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(device.name).font(.headline).foregroundColor(.primary)
-                                    Text(device.isOnline ? "Online" : lastSeenText(device.lastSeenAt))
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                                Spacer()
-                                Image(systemName: "chevron.right").font(.caption).foregroundColor(.secondary)
+
+                    NativeManageSectionHeader(
+                        title: "Devices",
+                        count: store.devices.count,
+                        systemImage: "desktopcomputer"
+                    )
+
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 154), spacing: 12)],
+                        spacing: 12
+                    ) {
+                        ForEach(store.devices) { device in
+                            Button { onOpenDevice(device.id) } label: {
+                                NativeDeviceManagementCard(device: device)
                             }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
                 }
+                .padding(.horizontal, 18)
+                .padding(.top, 8)
+                .padding(.bottom, 28)
             }
-            .listStyle(.insetGrouped)
+            .background(Color(.systemGroupedBackground))
             .refreshable { await store.refresh() }
             .onAppear { scrollToFocusedRequest(proxy) }
             .onChange(of: store.focusRequestId) { _ in scrollToFocusedRequest(proxy) }
@@ -305,66 +316,339 @@ struct NativeManageRootView: View {
         }
     }
 
+}
+
+private struct NativeManageSectionHeader: View {
+    let title: String
+    let count: Int
+    let systemImage: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: systemImage)
+                .foregroundColor(.secondary)
+            Text(title)
+                .font(.title3.weight(.bold))
+            Text("\(count)")
+                .font(.caption.weight(.semibold).monospacedDigit())
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Color(.tertiarySystemFill))
+                .clipShape(Capsule())
+            Spacer()
+        }
+    }
+}
+
+private struct NativeDeviceManagementCard: View {
+    let device: NativeDeviceSummary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top) {
+                Image(systemName: device.systemImage)
+                    .font(.system(size: 21, weight: .semibold))
+                    .foregroundColor(.accentColor)
+                    .frame(width: 42, height: 42)
+                    .background(Color.accentColor.opacity(0.10))
+                    .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                Spacer(minLength: 6)
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(device.isOnline ? Color.green : Color(.systemGray3))
+                        .frame(width: 7, height: 7)
+                    Text(device.isOnline ? "Online" : "Offline")
+                }
+                .font(.caption2.weight(.semibold))
+                .foregroundColor(device.isOnline ? .green : .secondary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 5)
+                .background(Color(.secondarySystemBackground))
+                .clipShape(Capsule())
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(device.name)
+                    .font(.headline)
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                Text(device.isOnline ? "Seen just now" : lastSeenText(device.lastSeenAt))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+
+            Divider()
+
+            HStack {
+                Text("Open management")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Image(systemName: "slider.horizontal.3")
+                    .font(.caption.weight(.semibold))
+            }
+            .foregroundColor(.accentColor)
+        }
+        .padding(13)
+        .frame(maxWidth: .infinity, minHeight: 154, alignment: .topLeading)
+        .background(Color(.systemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color(.separator).opacity(0.35), lineWidth: 0.7)
+        }
+    }
+
     private func lastSeenText(_ milliseconds: Double?) -> String {
         guard let milliseconds else { return "Never connected" }
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .short
-        return "Last seen \(formatter.localizedString(for: Date(timeIntervalSince1970: milliseconds / 1_000), relativeTo: Date()))"
+        return "Seen \(formatter.localizedString(for: Date(timeIntervalSince1970: milliseconds / 1_000), relativeTo: Date()))"
     }
 }
 
-private struct NativeRequestSummaryRow: View {
+private struct NativeRequestSummaryCard: View {
     let request: NativeAccessRequest
     let isFocused: Bool
     let isWorking: Bool
     let onApprove: (Int) -> Void
     let onReject: () -> Void
 
+    @State private var selectedMinutes = 30
+    @State private var customMode = false
+    @State private var customInput = ""
+    @FocusState private var customFieldFocused: Bool
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack {
-                Text(request.deviceName).font(.headline)
-                Spacer()
-                Text(relativeTime(request.createdAt)).font(.caption).foregroundColor(.secondary)
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(request.deviceName)
+                        .font(.headline)
+                    Spacer(minLength: 12)
+                    Text(relativeTime(request.createdAt))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                HStack(spacing: 7) {
+                    Text("PENDING")
+                        .font(.caption2.weight(.bold))
+                        .foregroundColor(Color(.systemOrange))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Color(.systemOrange).opacity(0.11))
+                        .clipShape(Capsule())
+                    Text(request.kindLabel)
+                        .font(.subheadline.weight(.medium))
+                    if let target = request.targetText {
+                        Text(target)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundColor(.accentColor)
+                            .lineLimit(1)
+                    }
+                }
             }
-            Text(request.kindLabel).font(.subheadline.weight(.medium))
-            if let target = request.targetText {
-                Text(target).font(.subheadline).foregroundColor(.secondary).lineLimit(2)
+            .padding(14)
+            .background(Color(.secondarySystemBackground))
+
+            Divider()
+
+            requestBody
+                .padding(16)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 12) {
+                if requestNeedsDuration {
+                    Text("DURATION")
+                        .font(.caption2.weight(.bold))
+                        .foregroundColor(.secondary)
+                        .tracking(0.8)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 7) {
+                            ForEach([15, 30, 60], id: \.self) { minutes in
+                                durationChip("\(minutes)m", active: !customMode && selectedMinutes == minutes) {
+                                    selectedMinutes = minutes
+                                    customMode = false
+                                    customFieldFocused = false
+                                }
+                            }
+                            durationChip("+ Custom", active: customMode) {
+                                customMode = true
+                                if customInput.isEmpty { customInput = String(selectedMinutes) }
+                                DispatchQueue.main.async { customFieldFocused = true }
+                            }
+                        }
+                    }
+
+                    if customMode {
+                        HStack(spacing: 8) {
+                            TextField("Minutes", text: $customInput)
+                                .focused($customFieldFocused)
+                                .keyboardType(.numberPad)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(maxWidth: 120)
+                                .onChange(of: customInput) { value in
+                                    if let minutes = Int(value), (1...240).contains(minutes) {
+                                        selectedMinutes = minutes
+                                    }
+                                }
+                            Text("1–240 min")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Button("Done") { customFieldFocused = false }
+                                .font(.subheadline.weight(.semibold))
+                        }
+                    }
+                }
+
+                HStack(spacing: 10) {
+                    actionButton("Reject", systemImage: "xmark", primary: false, action: onReject)
+                    actionButton(approveLabel, systemImage: "checkmark", primary: true) {
+                        onApprove(requestNeedsDuration ? selectedMinutes : 1)
+                    }
+                    .disabled(!canApprove)
+                    .opacity(canApprove ? 1 : 0.5)
+                }
+
+                if isWorking {
+                    ProgressView("Updating request...")
+                        .font(.caption)
+                }
             }
-            if request.kind != "allow-download" && request.kind != "allow-video" {
-                Text("Requests \(request.requestedMinutes) min")
+            .padding(14)
+            .background(Color(.secondarySystemBackground))
+        }
+        .background(Color(.systemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 17, style: .continuous)
+                .stroke(
+                    isFocused ? Color.accentColor : Color(.separator).opacity(0.38),
+                    lineWidth: isFocused ? 2 : 0.7
+                )
+        }
+        .shadow(color: Color.black.opacity(0.04), radius: 8, y: 3)
+        .disabled(isWorking)
+    }
+
+    @ViewBuilder
+    private var requestBody: some View {
+        if request.kind == "allow-download" {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("DOWNLOAD REQUEST")
+                    .font(.caption2.weight(.bold))
+                    .foregroundColor(.secondary)
+                Text("Wants to download a file from \(request.target ?? "an unknown page")")
+                    .font(.subheadline)
+                    .foregroundColor(.primary)
+                    .lineLimit(3)
+            }
+        } else if request.kind == "allow-video" {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("VIDEO REQUEST")
+                    .font(.caption2.weight(.bold))
+                    .foregroundColor(.secondary)
+                Text(request.videoTitle ?? request.target ?? "Bilibili video")
+                    .font(.headline)
+                Text("Access expires at midnight on the child device.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            HStack(spacing: 10) {
-                Button("Reject", role: .destructive, action: onReject)
-                    .buttonStyle(.bordered)
-                    .disabled(isWorking)
-                Spacer()
-                if request.kind == "allow-download" || request.kind == "allow-video" {
-                    Button("Approve") { onApprove(1) }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isWorking)
-                } else {
-                    Button("Approve \(request.approvalMinutes)m") { onApprove(request.approvalMinutes) }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isWorking)
-                    Menu {
-                        Button("15 minutes") { onApprove(15) }
-                        Button("30 minutes") { onApprove(30) }
-                        Button("60 minutes") { onApprove(60) }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                    }
-                    .disabled(isWorking)
+        } else {
+            HStack(spacing: 28) {
+                requestMetric(label: "REQUEST", value: "+\(request.requestedMinutes)", unit: "min")
+                if request.kind == "allow-site" || request.kind == "extend-site" {
+                    requestMetric(label: "USED TODAY", value: usageTodayText, unit: "")
                 }
+                Spacer(minLength: 0)
             }
-            if isWorking { ProgressView().controlSize(.small) }
         }
-        .padding(.vertical, 5)
-        .overlay(alignment: .leading) {
-            if isFocused {
-                RoundedRectangle(cornerRadius: 2).fill(Color.accentColor).frame(width: 3)
+    }
+
+    private var requestNeedsDuration: Bool {
+        request.kind != "allow-download" && request.kind != "allow-video"
+    }
+
+    private var approveLabel: String {
+        if request.kind == "allow-video" { return "Allow until midnight" }
+        if request.kind == "allow-download" { return "Approve" }
+        return "Approve · \(canApprove ? String(selectedMinutes) : "–")m"
+    }
+
+    private var canApprove: Bool {
+        guard customMode else { return true }
+        guard let minutes = Int(customInput) else { return false }
+        return (1...240).contains(minutes)
+    }
+
+    private var usageTodayText: String {
+        let minutes = max(0, Int((request.targetUsageTodayMs ?? 0) / 60_000))
+        return "\(minutes) min"
+    }
+
+    private func durationChip(_ label: String, active: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .font(.subheadline.weight(.semibold))
+                .foregroundColor(active ? .accentColor : .primary)
+                .padding(.horizontal, 12)
+                .frame(minHeight: 34)
+                .background(active ? Color.accentColor.opacity(0.10) : Color(.systemBackground))
+                .clipShape(Capsule())
+                .overlay {
+                    Capsule().stroke(
+                        active ? Color.accentColor.opacity(0.25) : Color(.separator).opacity(0.45),
+                        lineWidth: 0.7
+                    )
+                }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func actionButton(
+        _ label: String,
+        systemImage: String,
+        primary: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Label(label, systemImage: systemImage)
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+                .foregroundColor(primary ? .white : .primary)
+                .frame(maxWidth: .infinity, minHeight: 43)
+                .background(primary ? Color.accentColor : Color(.systemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay {
+                    if !primary {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(Color(.separator).opacity(0.45), lineWidth: 0.7)
+                    }
+                }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func requestMetric(label: String, value: String, unit: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(label)
+                .font(.caption2.weight(.bold))
+                .foregroundColor(.secondary)
+                .tracking(0.7)
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(value)
+                    .font(.system(size: 31, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                if !unit.isEmpty {
+                    Text(unit)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(.secondary)
+                }
             }
         }
     }

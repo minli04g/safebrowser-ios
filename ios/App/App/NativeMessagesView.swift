@@ -266,6 +266,7 @@ private struct NativeMessageThreadView: View {
     @State private var selectedMentions: [NativeMessageActor] = []
     @State private var sendError: String?
     @State private var quickEmojisVisible = false
+    @State private var emojiPage = 0
     @State private var hasScrolledToLatest = false
     @State private var pendingScrollTask: Task<Void, Never>?
     @StateObject private var recorder = NativeVoiceRecorder()
@@ -285,6 +286,14 @@ private struct NativeMessageThreadView: View {
                     Text(conversation.presence.onlineCount > 0 ? "Online" : "Offline")
                         .font(.caption2)
                         .foregroundColor(.secondary)
+                }
+            }
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button {
+                    composerFocused = false
+                } label: {
+                    Label("Hide Keyboard", systemImage: "keyboard.chevron.compact.down")
                 }
             }
         }
@@ -330,6 +339,10 @@ private struct NativeMessageThreadView: View {
             // top and visibly jumping when a conversation is opened.
             .opacity(messages.isEmpty || hasScrolledToLatest ? 1 : 0)
             .background(Color(.systemGroupedBackground))
+            .onTapGesture {
+                composerFocused = false
+                closeEmojiPicker()
+            }
             .onAppear { scrollToLatest(using: proxy) }
             .onChange(of: messages.last?.id) { _ in scrollToLatest(using: proxy) }
             .onDisappear { pendingScrollTask?.cancel() }
@@ -363,27 +376,11 @@ private struct NativeMessageThreadView: View {
                 Divider()
             }
             if quickEmojisVisible {
-                Divider()
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(["😀", "😂", "🥰", "👍", "👏", "❤️", "🎉"], id: \.self) { emoji in
-                            Button {
-                                draft += emoji
-                                composerFocused = true
-                            } label: {
-                                Text(emoji)
-                                    .font(.title2)
-                                    .frame(width: 38, height: 38)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Insert \(emoji)")
-                        }
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                }
-                .background(Color(.secondarySystemBackground))
+                NativePagedEmojiPicker(
+                    selectedPage: $emojiPage,
+                    onSelect: { draft += $0 },
+                    onClose: closeEmojiPicker
+                )
             }
             HStack(alignment: .bottom, spacing: 7) {
                 TextField("Write a message", text: $draft)
@@ -391,11 +388,16 @@ private struct NativeMessageThreadView: View {
                     .submitLabel(.send)
                     .onSubmit { sendText() }
                     .textFieldStyle(.roundedBorder)
-                Button {
-                    withAnimation(.easeInOut(duration: 0.16)) {
-                        quickEmojisVisible.toggle()
+                    .onChange(of: composerFocused) { focused in
+                        guard focused, quickEmojisVisible else { return }
+                        closeEmojiPicker()
                     }
-                    composerFocused = true
+                Button {
+                    let willShow = !quickEmojisVisible
+                    if willShow { composerFocused = false }
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        quickEmojisVisible = willShow
+                    }
                 } label: {
                     Image(systemName: quickEmojisVisible ? "face.smiling.fill" : "face.smiling")
                         .frame(width: 36, height: 36)
@@ -403,6 +405,7 @@ private struct NativeMessageThreadView: View {
                 .accessibilityLabel(quickEmojisVisible ? "Hide emojis" : "Show emojis")
                 if conversation.kind == "family" {
                     Button {
+                        closeEmojiPicker()
                         if !draft.hasSuffix(" ") && !draft.isEmpty { draft += " " }
                         draft += "@"
                         composerFocused = true
@@ -412,9 +415,11 @@ private struct NativeMessageThreadView: View {
                     }
                     .accessibilityLabel("Mention a family member")
                 }
-                NativeVoiceRecordButton(recorder: recorder) { capture in
-                    sendVoice(capture)
-                }
+                NativeVoiceRecordButton(
+                    recorder: recorder,
+                    onBegan: closeEmojiPicker,
+                    onFinished: sendVoice
+                )
             }
             .padding(.horizontal, 9)
             .padding(.top, 8)
@@ -436,6 +441,13 @@ private struct NativeMessageThreadView: View {
         draft.replaceSubrange(marker..., with: "@\(member.label) ")
         if !selectedMentions.contains(member.actor) { selectedMentions.append(member.actor) }
         composerFocused = true
+    }
+
+    private func closeEmojiPicker() {
+        guard quickEmojisVisible else { return }
+        withAnimation(.easeInOut(duration: 0.16)) {
+            quickEmojisVisible = false
+        }
     }
 
     private func shouldShowTimestamp(at index: Int) -> Bool {
@@ -566,6 +578,109 @@ private struct NativeMessageThreadView: View {
                 sendError = error.localizedDescription
             }
         }
+    }
+}
+
+private struct NativeEmojiPage: Identifiable {
+    let id: String
+    let title: String
+    let emojis: [String]
+}
+
+private struct NativePagedEmojiPicker: View {
+    @Binding var selectedPage: Int
+    let onSelect: (String) -> Void
+    let onClose: () -> Void
+
+    private static let pages: [NativeEmojiPage] = [
+        NativeEmojiPage(
+            id: "smileys",
+            title: "Smileys",
+            emojis: ["😀", "😃", "😄", "😁", "😆", "😅", "😂", "🤣", "😊", "😇", "🙂", "🙃", "😉", "😌", "😍", "🥰", "😘", "😗", "😙", "😚", "😋", "😛", "😝", "😜", "🤪", "🤨", "🧐", "🤓"]
+        ),
+        NativeEmojiPage(
+            id: "people",
+            title: "People",
+            emojis: ["🤗", "🤭", "🤫", "🤔", "🫡", "🤐", "😐", "😑", "😶", "🫥", "😏", "😒", "🙄", "😬", "😮‍💨", "🤥", "🤤", "😴", "😷", "🤒", "🤕", "🤢", "🤮", "🤧", "🥵", "🥶", "🥳", "😎"]
+        ),
+        NativeEmojiPage(
+            id: "gestures",
+            title: "Gestures",
+            emojis: ["👍", "👎", "👌", "🤌", "🤏", "✌️", "🤞", "🫰", "🤟", "🤘", "🤙", "👈", "👉", "👆", "👇", "☝️", "👋", "🤚", "🖐️", "✋", "🖖", "👏", "🙌", "🫶", "🤝", "🙏", "💪", "❤️"]
+        ),
+        NativeEmojiPage(
+            id: "nature",
+            title: "Nature",
+            emojis: ["🐶", "🐱", "🐭", "🐹", "🐰", "🦊", "🐻", "🐼", "🐨", "🐯", "🦁", "🐮", "🐷", "🐸", "🐵", "🙈", "🙉", "🙊", "🐔", "🐧", "🐦", "🐤", "🦄", "🐝", "🦋", "🌸", "🌈", "⭐️"]
+        ),
+        NativeEmojiPage(
+            id: "food",
+            title: "Food",
+            emojis: ["🍎", "🍊", "🍋", "🍉", "🍇", "🍓", "🫐", "🍒", "🍑", "🥭", "🍍", "🥝", "🍅", "🥑", "🥦", "🌽", "🥕", "🍞", "🥐", "🧀", "🍔", "🍟", "🍕", "🌭", "🍿", "🍩", "🍪", "🎂"]
+        ),
+        NativeEmojiPage(
+            id: "activity",
+            title: "Activity",
+            emojis: ["⚽️", "🏀", "🏈", "⚾️", "🎾", "🏐", "🏓", "🏸", "🥅", "🏆", "🥇", "🎮", "🎯", "🎳", "🎸", "🎹", "🎧", "🎨", "🎬", "🚗", "✈️", "🚀", "🏠", "💡", "📱", "💻", "⌚️", "🎁"]
+        ),
+        NativeEmojiPage(
+            id: "symbols",
+            title: "Symbols",
+            emojis: ["🎉", "🎊", "✅", "❌", "⭕️", "❗️", "❓", "💯", "🔥", "✨", "💫", "💥", "💤", "💬", "👀", "💙", "💚", "💛", "🧡", "💜", "🤍", "🤎", "🖤", "💔", "💕", "💖", "💗", "💓"]
+        )
+    ]
+
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 5), count: 7)
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "face.smiling")
+                    .foregroundColor(.accentColor)
+                Text(Self.pages[selectedPage].title)
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("\(selectedPage + 1) / \(Self.pages.count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundColor(.secondary)
+                Button(action: onClose) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(Color(.tertiaryLabel))
+                        .frame(width: 32, height: 32)
+                }
+                .accessibilityLabel("Close emoji picker")
+            }
+            .padding(.leading, 14)
+            .padding(.trailing, 8)
+            .frame(height: 40)
+
+            Divider()
+
+            TabView(selection: $selectedPage) {
+                ForEach(Array(Self.pages.enumerated()), id: \.element.id) { index, page in
+                    LazyVGrid(columns: columns, spacing: 4) {
+                        ForEach(page.emojis, id: \.self) { emoji in
+                            Button { onSelect(emoji) } label: {
+                                Text(emoji)
+                                    .font(.title2)
+                                    .frame(maxWidth: .infinity, minHeight: 38)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Insert \(emoji)")
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.top, 7)
+                    .padding(.bottom, 24)
+                    .tag(index)
+                }
+            }
+            .tabViewStyle(PageTabViewStyle(indexDisplayMode: .always))
+            .indexViewStyle(PageIndexViewStyle(backgroundDisplayMode: .interactive))
+            .frame(height: 194)
+        }
+        .background(Color(.secondarySystemBackground))
     }
 }
 
@@ -764,6 +879,7 @@ final class NativeVoiceRecorder: NSObject, ObservableObject {
 
 private struct NativeVoiceRecordButton: View {
     @ObservedObject var recorder: NativeVoiceRecorder
+    let onBegan: () -> Void
     let onFinished: (NativeVoiceCapture) -> Void
     @State private var holding = false
 
@@ -777,6 +893,7 @@ private struct NativeVoiceRecordButton: View {
                 DragGesture(minimumDistance: 0)
                     .onChanged { _ in
                         guard !holding else { return }
+                        onBegan()
                         holding = true
                         Task {
                             await recorder.start()
