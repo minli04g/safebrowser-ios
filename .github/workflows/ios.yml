@@ -12,9 +12,14 @@ on:
         type: choice
         options: [beta, init_signing, create_app]
 
+concurrency:
+  group: ios-testflight
+  cancel-in-progress: false
+
 jobs:
   ios:
     runs-on: macos-26
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -45,7 +50,7 @@ jobs:
         env:
           BUILD_NUMBER: ${{ github.run_number }}
 
-      - name: Fastlane ${{ github.event.inputs.lane || 'beta' }}
+      - name: Fastlane ${{ github.event.inputs.lane || 'beta' }} (wait for App Store processing)
         run: bundle exec fastlane ${{ github.event.inputs.lane || 'beta' }}
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}

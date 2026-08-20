@@ -64,6 +64,15 @@ platform :ios do
         }
       }
     )
-    upload_to_testflight(api_key: api_key, skip_waiting_for_build_processing: true)
+    # Do not report success until App Store Connect has actually processed the
+    # build. Skipping this wait only proves that Transporter accepted the IPA;
+    # it also prevents fastlane from completing the TestFlight distribution
+    # flow and hides processing failures from CI.
+    upload_to_testflight(
+      api_key: api_key,
+      skip_waiting_for_build_processing: false,
+      wait_processing_interval: 30,
+      wait_processing_timeout_duration: 2700
+    )
   end
 end

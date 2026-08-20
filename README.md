@@ -31,5 +31,9 @@ macOS runner — no local Mac required. Signing uses [fastlane match](https://do
 - `init_signing` lane (run once via workflow dispatch) creates and stores the
   signing cert/profile.
 
+The beta lane waits for App Store Connect processing to finish. CI succeeds
+only after the build is available in TestFlight, and fails after 45 minutes if
+Apple leaves the upload stuck in processing.
+
 No secrets live in this repo — signing material is in CI secrets and the private
 match repo; the APNs key lives on the server.
