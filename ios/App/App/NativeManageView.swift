@@ -237,14 +237,15 @@ struct NativeManageRootView: View {
         }
         .navigationViewStyle(.stack)
         .onAppear { store.start() }
-        .alert("Manage", isPresented: Binding(
-            get: { store.noticeText != nil },
-            set: { if !$0 { store.noticeText = nil } }
-        )) {
-            Button("OK", role: .cancel) { store.noticeText = nil }
-        } message: {
-            Text(store.noticeText ?? "")
+        .overlay {
+            if let notice = store.noticeText {
+                NativeManageNoticeOverlay(message: notice) {
+                    store.noticeText = nil
+                }
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            }
         }
+        .animation(.easeOut(duration: 0.18), value: store.noticeText)
     }
 
     private var summaryList: some View {
@@ -334,6 +335,59 @@ struct NativeManageRootView: View {
         )
     }
 
+}
+
+private struct NativeManageNoticeOverlay: View {
+    let message: String
+    let onDismiss: () -> Void
+
+    private var wasRejected: Bool {
+        message.localizedCaseInsensitiveContains("rejected")
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.24)
+                .ignoresSafeArea()
+                .onTapGesture(perform: onDismiss)
+
+            VStack(spacing: 14) {
+                Image(systemName: wasRejected ? "xmark.circle.fill" : "checkmark.circle.fill")
+                    .font(.system(size: 42, weight: .semibold))
+                    .foregroundColor(wasRejected ? Color(.systemOrange) : Color(.systemGreen))
+
+                VStack(spacing: 6) {
+                    Text(wasRejected ? "Request rejected" : "Request approved")
+                        .font(.title3.weight(.semibold))
+                    Text(message)
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+
+                Button(action: onDismiss) {
+                    Text("Done")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity, minHeight: 46)
+                        .background(wasRejected ? Color(.systemOrange) : Color.accentColor)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(22)
+            .frame(maxWidth: 310)
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .stroke(Color.white.opacity(0.5), lineWidth: 0.7)
+            }
+            .shadow(color: Color.black.opacity(0.18), radius: 24, y: 10)
+            .padding(.horizontal, 28)
+        }
+        .accessibilityElement(children: .contain)
+    }
 }
 
 private struct NativeManageSectionHeader: View {
@@ -427,6 +481,67 @@ private struct NativeDeviceManagementCard: View {
     }
 }
 
+private struct NativeSelectAllNumberField: UIViewRepresentable {
+    @Binding var text: String
+    @Binding var isFocused: Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeUIView(context: Context) -> UITextField {
+        let textField = UITextField(frame: .zero)
+        textField.delegate = context.coordinator
+        textField.keyboardType = .numberPad
+        textField.textAlignment = .center
+        textField.font = .systemFont(ofSize: 16, weight: .semibold)
+        textField.textColor = .systemBlue
+        textField.borderStyle = .none
+        textField.addTarget(
+            context.coordinator,
+            action: #selector(Coordinator.textDidChange(_:)),
+            for: .editingChanged
+        )
+        return textField
+    }
+
+    func updateUIView(_ textField: UITextField, context: Context) {
+        context.coordinator.parent = self
+        if textField.text != text { textField.text = text }
+
+        if isFocused, !textField.isFirstResponder {
+            DispatchQueue.main.async {
+                guard isFocused else { return }
+                textField.becomeFirstResponder()
+                textField.selectAll(nil)
+            }
+        } else if !isFocused, textField.isFirstResponder {
+            textField.resignFirstResponder()
+        }
+    }
+
+    final class Coordinator: NSObject, UITextFieldDelegate {
+        var parent: NativeSelectAllNumberField
+
+        init(parent: NativeSelectAllNumberField) {
+            self.parent = parent
+        }
+
+        @objc func textDidChange(_ textField: UITextField) {
+            parent.text = textField.text ?? ""
+        }
+
+        func textFieldDidBeginEditing(_ textField: UITextField) {
+            if !parent.isFocused { parent.isFocused = true }
+            DispatchQueue.main.async { textField.selectAll(nil) }
+        }
+
+        func textFieldDidEndEditing(_ textField: UITextField) {
+            if parent.isFocused { parent.isFocused = false }
+        }
+    }
+}
+
 private struct NativeRequestSummaryCard: View {
     let request: NativeAccessRequest
     let isFocused: Bool
@@ -437,7 +552,7 @@ private struct NativeRequestSummaryCard: View {
     @State private var selectedMinutes = 30
     @State private var customMode = false
     @State private var customInput = ""
-    @FocusState private var customFieldFocused: Bool
+    @State private var customFieldFocused = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -612,11 +727,10 @@ private struct NativeRequestSummaryCard: View {
 
     private var customDurationChip: some View {
         HStack(spacing: 2) {
-            TextField("min", text: $customInput)
-                .focused($customFieldFocused)
-                .keyboardType(.numberPad)
-                .multilineTextAlignment(.center)
-                .textFieldStyle(.plain)
+            NativeSelectAllNumberField(
+                text: $customInput,
+                isFocused: $customFieldFocused
+            )
                 .frame(width: 44, height: 32)
                 .onChange(of: customInput) { value in
                     if let minutes = Int(value), (1...240).contains(minutes) {
