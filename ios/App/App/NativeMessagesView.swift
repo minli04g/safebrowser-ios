@@ -301,19 +301,33 @@ private struct NativeDisplayMessage: Identifiable, Equatable {
     var delivery: NativeDeliveryState
 }
 
-private final class NativeKeyboardEdgeAccessoryView: UIView {
+private final class NativeKeyboardEdgeAccessoryView: UIVisualEffectView {
     override var intrinsicContentSize: CGSize {
         CGSize(width: UIView.noIntrinsicMetric, height: 1)
     }
 
     override init(frame: CGRect) {
-        super.init(frame: frame)
-        backgroundColor = .systemGray5
+        super.init(effect: UIBlurEffect(style: .systemChromeMaterial))
+        self.frame = frame
         isUserInteractionEnabled = false
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+}
+
+private struct NativeKeyboardBackdrop: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIVisualEffectView {
+        let view = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
+        view.isUserInteractionEnabled = false
+        return view
+    }
+
+    func updateUIView(_ view: UIVisualEffectView, context: Context) {
+        if !(view.effect is UIBlurEffect) {
+            view.effect = UIBlurEffect(style: .systemChromeMaterial)
+        }
     }
 }
 
@@ -420,11 +434,11 @@ private struct NativeMessageThreadView: View {
 
     var body: some View {
         ZStack {
-            // The system keyboard uses a rounded top mask. Extending a
-            // keyboard-colored surface underneath it fills the exposed corner
-            // pixels so a docked keyboard reads as one full-width rectangle.
-            Color(.systemGray5)
+            // Use the same adaptive system chrome material for the surface
+            // revealed by the keyboard's rounded mask and its accessory edge.
+            NativeKeyboardBackdrop()
                 .ignoresSafeArea(.keyboard, edges: .bottom)
+                .allowsHitTesting(false)
 
             messageHistory
                 .safeAreaInset(edge: .bottom, spacing: 0) {
