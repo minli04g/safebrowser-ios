@@ -306,7 +306,7 @@ private final class NativeKeyboardEdgeAccessoryView: UIVisualEffectView {
         CGSize(width: UIView.noIntrinsicMetric, height: 1)
     }
 
-    override init(frame: CGRect) {
+    init(frame: CGRect) {
         super.init(effect: UIBlurEffect(style: .systemChromeMaterial))
         self.frame = frame
         isUserInteractionEnabled = false
