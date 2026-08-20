@@ -327,9 +327,17 @@ private struct NativeMessageThreadView: View {
     @FocusState private var composerFocused: Bool
 
     var body: some View {
-        messageHistory
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if conversation.canSend { composer }
+        ZStack {
+            // The system keyboard uses a rounded top mask. Extending a
+            // keyboard-colored surface underneath it fills the exposed corner
+            // pixels so a docked keyboard reads as one full-width rectangle.
+            Color(.systemGray5)
+                .ignoresSafeArea(.keyboard, edges: .bottom)
+
+            messageHistory
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    if conversation.canSend { composer }
+                }
         }
         .navigationTitle(conversation.displayLabel)
         .navigationBarTitleDisplayMode(.inline)
