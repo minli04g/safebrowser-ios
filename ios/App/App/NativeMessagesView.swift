@@ -269,6 +269,7 @@ private struct NativeMessageThreadView: View {
     @State private var emojiPage = 0
     @State private var hasScrolledToLatest = false
     @State private var pendingScrollTask: Task<Void, Never>?
+    @State private var keyboardScrollTask: Task<Void, Never>?
     @StateObject private var recorder = NativeVoiceRecorder()
     @FocusState private var composerFocused: Bool
 
@@ -345,7 +346,13 @@ private struct NativeMessageThreadView: View {
             }
             .onAppear { scrollToLatest(using: proxy) }
             .onChange(of: messages.last?.id) { _ in scrollToLatest(using: proxy) }
-            .onDisappear { pendingScrollTask?.cancel() }
+            .onChange(of: composerFocused) { focused in
+                if focused { keepLatestVisibleAboveKeyboard(using: proxy) }
+            }
+            .onDisappear {
+                pendingScrollTask?.cancel()
+                keyboardScrollTask?.cancel()
+            }
         }
     }
 
@@ -487,6 +494,29 @@ private struct NativeMessageThreadView: View {
         }
     }
 
+    private func keepLatestVisibleAboveKeyboard(using proxy: ScrollViewProxy) {
+        guard !messages.isEmpty else { return }
+        keyboardScrollTask?.cancel()
+        keyboardScrollTask = Task { @MainActor in
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 40_000_000)
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.25)) {
+                proxy.scrollTo("native-message-bottom", anchor: .bottom)
+            }
+
+            // Calibrate once after the keyboard's safe-area animation has
+            // completed so the final bubble cannot remain under the composer.
+            try? await Task.sleep(nanoseconds: 320_000_000)
+            guard !Task.isCancelled, composerFocused else { return }
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                proxy.scrollTo("native-message-bottom", anchor: .bottom)
+            }
+        }
+    }
+
     private func loadMessages() async {
         loading = true
         defer { loading = false }
@@ -591,6 +621,9 @@ private struct NativePagedEmojiPicker: View {
     @Binding var selectedPage: Int
     let onSelect: (String) -> Void
     let onClose: () -> Void
+    @State private var recentEmojis = UserDefaults.standard.stringArray(
+        forKey: "SafeBrowser.NativeEmoji.recent"
+    ) ?? []
 
     private static let pages: [NativeEmojiPage] = [
         NativeEmojiPage(
@@ -656,11 +689,37 @@ private struct NativePagedEmojiPicker: View {
 
             Divider()
 
+            if !recentEmojis.isEmpty {
+                HStack(spacing: 8) {
+                    Label("Recent", systemImage: "clock.arrow.circlepath")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.secondary)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 3) {
+                            ForEach(recentEmojis, id: \.self) { emoji in
+                                Button { selectEmoji(emoji) } label: {
+                                    Text(emoji)
+                                        .font(.title3)
+                                        .frame(width: 34, height: 34)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Insert recent \(emoji)")
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 44)
+
+                Divider()
+            }
+
             TabView(selection: $selectedPage) {
                 ForEach(Array(Self.pages.enumerated()), id: \.element.id) { index, page in
                     LazyVGrid(columns: columns, spacing: 4) {
                         ForEach(page.emojis, id: \.self) { emoji in
-                            Button { onSelect(emoji) } label: {
+                            Button { selectEmoji(emoji) } label: {
                                 Text(emoji)
                                     .font(.title2)
                                     .frame(maxWidth: .infinity, minHeight: 38)
@@ -681,6 +740,14 @@ private struct NativePagedEmojiPicker: View {
             .frame(height: 194)
         }
         .background(Color(.secondarySystemBackground))
+    }
+
+    private func selectEmoji(_ emoji: String) {
+        var updated = recentEmojis.filter { $0 != emoji }
+        updated.insert(emoji, at: 0)
+        recentEmojis = Array(updated.prefix(8))
+        UserDefaults.standard.set(recentEmojis, forKey: "SafeBrowser.NativeEmoji.recent")
+        onSelect(emoji)
     }
 }
 

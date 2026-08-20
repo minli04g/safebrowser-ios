@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct NativeDeviceSummary: Codable, Identifiable, Hashable {
     let id: String
@@ -224,6 +225,14 @@ struct NativeManageRootView: View {
                     }
                     .accessibilityLabel("Account settings")
                 }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button {
+                        dismissKeyboard()
+                    } label: {
+                        Label("Done", systemImage: "keyboard.chevron.compact.down")
+                    }
+                }
             }
         }
         .navigationViewStyle(.stack)
@@ -314,6 +323,15 @@ struct NativeManageRootView: View {
             transaction.disablesAnimations = true
             withTransaction(transaction) { proxy.scrollTo(requestId, anchor: .center) }
         }
+    }
+
+    private func dismissKeyboard() {
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder),
+            to: nil,
+            from: nil,
+            for: nil
+        )
     }
 
 }
@@ -475,32 +493,15 @@ private struct NativeRequestSummaryCard: View {
                                     customFieldFocused = false
                                 }
                             }
-                            durationChip("+ Custom", active: customMode) {
-                                customMode = true
-                                if customInput.isEmpty { customInput = String(selectedMinutes) }
-                                DispatchQueue.main.async { customFieldFocused = true }
-                            }
-                        }
-                    }
-
-                    if customMode {
-                        HStack(spacing: 8) {
-                            TextField("Minutes", text: $customInput)
-                                .focused($customFieldFocused)
-                                .keyboardType(.numberPad)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(maxWidth: 120)
-                                .onChange(of: customInput) { value in
-                                    if let minutes = Int(value), (1...240).contains(minutes) {
-                                        selectedMinutes = minutes
-                                    }
+                            if customMode {
+                                customDurationChip
+                            } else {
+                                durationChip("+ Custom", active: false) {
+                                    customMode = true
+                                    if customInput.isEmpty { customInput = String(selectedMinutes) }
+                                    DispatchQueue.main.async { customFieldFocused = true }
                                 }
-                            Text("1–240 min")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            Spacer()
-                            Button("Done") { customFieldFocused = false }
-                                .font(.subheadline.weight(.semibold))
+                            }
                         }
                     }
                 }
@@ -607,6 +608,33 @@ private struct NativeRequestSummaryCard: View {
                 }
         }
         .buttonStyle(.plain)
+    }
+
+    private var customDurationChip: some View {
+        HStack(spacing: 2) {
+            TextField("min", text: $customInput)
+                .focused($customFieldFocused)
+                .keyboardType(.numberPad)
+                .multilineTextAlignment(.center)
+                .textFieldStyle(.plain)
+                .frame(width: 44, height: 32)
+                .onChange(of: customInput) { value in
+                    if let minutes = Int(value), (1...240).contains(minutes) {
+                        selectedMinutes = minutes
+                    }
+                }
+            Text("m")
+                .font(.subheadline.weight(.semibold))
+        }
+        .foregroundColor(.accentColor)
+        .padding(.horizontal, 10)
+        .background(Color.accentColor.opacity(0.10))
+        .clipShape(Capsule())
+        .overlay {
+            Capsule().stroke(Color.accentColor.opacity(0.25), lineWidth: 0.7)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Custom approval minutes")
     }
 
     private func actionButton(
