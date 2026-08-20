@@ -338,6 +338,8 @@ private struct NativeMessageTextField: UIViewRepresentable {
         textField.backgroundColor = .clear
         textField.font = .preferredFont(forTextStyle: .body)
         textField.adjustsFontForContentSizeCategory = true
+        textField.setContentHuggingPriority(.required, for: .vertical)
+        textField.setContentCompressionResistancePriority(.required, for: .vertical)
         textField.inputAccessoryView = NativeKeyboardEdgeAccessoryView(frame: .zero)
         textField.addTarget(
             context.coordinator,
@@ -556,7 +558,13 @@ private struct NativeMessageThreadView: View {
                             onSubmit: sendText,
                             onBeganEditing: { composerMode = .keyboard }
                         )
-                        .frame(maxWidth: .infinity, minHeight: 32)
+                        .frame(
+                            minWidth: 0,
+                            maxWidth: .infinity,
+                            minHeight: 32,
+                            idealHeight: 32,
+                            maxHeight: 32
+                        )
                         Button {
                             toggleVoiceComposer()
                         } label: {
