@@ -50,6 +50,16 @@ final class NativeMessageAPI {
         return response.requests
     }
 
+    func setConversationMuted(conversationId: String, muted: Bool) async throws -> Bool {
+        let body = NativeSetConversationMutedBody(muted: muted)
+        let response: NativeSetConversationMutedResponse = try await request(
+            path: "/v1/messages/conversations/\(encodePath(conversationId))/mute",
+            method: "PUT",
+            body: try encoder.encode(body)
+        )
+        return response.muted
+    }
+
     func approveRequest(deviceId: String, requestId: String, minutes: Int) async throws -> Int {
         let body = NativeApproveRequestBody(minutes: minutes)
         let response: NativeApproveRequestResponse = try await request(
@@ -115,6 +125,14 @@ final class NativeMessageAPI {
                 "X-Voice-Duration-Ms": String(durationMs),
                 "X-Voice-Mime-Type": mimeType
             ]
+        )
+        return response.message
+    }
+
+    func recallMessage(conversationId: String, messageId: String) async throws -> NativeMessageRecord {
+        let response: NativeRecallMessageResponse = try await request(
+            path: "/v1/messages/conversations/\(encodePath(conversationId))/messages/\(encodePath(messageId))/recall",
+            method: "POST"
         )
         return response.message
     }

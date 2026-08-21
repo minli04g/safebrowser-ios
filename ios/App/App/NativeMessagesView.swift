@@ -88,6 +88,7 @@ final class NativeMessageStore: ObservableObject {
                 latest: conversation.latest,
                 unreadCount: 0,
                 presence: conversation.presence,
+                muted: conversation.muted,
                 members: conversation.members
             )
         }
@@ -255,6 +256,12 @@ private struct NativeConversationRow: View {
                 HStack {
                     Text(conversation.displayLabel).font(.headline)
                     Spacer()
+                    if conversation.muted == true {
+                        Image(systemName: "bell.slash.fill")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .accessibilityLabel("Notifications muted")
+                    }
                     if let date = conversation.latest?.date {
                         Text(date, style: .time).font(.caption).foregroundColor(.secondary)
                     }
@@ -431,6 +438,17 @@ private struct NativeMessageThreadView: View {
     @State private var keyboardScrollTask: Task<Void, Never>?
     @StateObject private var recorder = NativeVoiceRecorder()
     @State private var composerFocused = false
+    @State private var voiceRecordingActive = false
+    @State private var voiceCancelArmed = false
+    @State private var recallingMessageId: String?
+    @State private var isMuted: Bool
+    @State private var updatingMute = false
+
+    init(conversation: NativeMessageConversation, store: NativeMessageStore) {
+        self.conversation = conversation
+        self.store = store
+        _isMuted = State(initialValue: conversation.muted == true)
+    }
 
     var body: some View {
         ZStack {
@@ -444,6 +462,13 @@ private struct NativeMessageThreadView: View {
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     if conversation.canSend { composer }
                 }
+
+            if voiceRecordingActive {
+                NativeVoiceRecordingOverlay(cancelArmed: voiceCancelArmed)
+                    .transition(.opacity)
+                    .zIndex(10)
+                    .allowsHitTesting(false)
+            }
         }
         .navigationTitle(conversation.displayLabel)
         .navigationBarTitleDisplayMode(.inline)
@@ -455,6 +480,19 @@ private struct NativeMessageThreadView: View {
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
+            }
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button {
+                    toggleMuted()
+                } label: {
+                    if updatingMute {
+                        ProgressView()
+                    } else {
+                        Image(systemName: isMuted ? "bell.slash.fill" : "bell")
+                    }
+                }
+                .disabled(updatingMute)
+                .accessibilityLabel(isMuted ? "Turn on message notifications" : "Mute message notifications")
             }
         }
         .task { await loadMessages() }
@@ -486,7 +524,12 @@ private struct NativeMessageThreadView: View {
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
-                        NativeMessageBubble(message: message, api: store.api)
+                        NativeMessageBubble(
+                            message: message,
+                            api: store.api,
+                            isRecalling: recallingMessageId == message.record.id,
+                            onRecall: { recall(message) }
+                        )
                     }
                     Color.clear.frame(height: 1).id("native-message-bottom")
                 }
@@ -560,7 +603,12 @@ private struct NativeMessageThreadView: View {
                 if composerMode == .voice {
                     NativeVoiceRecordButton(
                         recorder: recorder,
-                        onBegan: {},
+                        onStateChanged: { active, cancelArmed in
+                            withAnimation(.easeOut(duration: 0.12)) {
+                                voiceRecordingActive = active
+                                voiceCancelArmed = cancelArmed
+                            }
+                        },
                         onFinished: sendVoice
                     )
                     .layoutPriority(1)
@@ -840,6 +888,7 @@ private struct NativeMessageThreadView: View {
             mentions: selectedMentions.isEmpty ? nil : selectedMentions,
             readReceipts: nil,
             voice: nil,
+            recalledAt: nil,
             createdAt: Date().timeIntervalSince1970 * 1_000
         )
         messages.append(NativeDisplayMessage(id: clientId, record: optimistic, delivery: .sending))
@@ -884,6 +933,53 @@ private struct NativeMessageThreadView: View {
                 }
             } catch {
                 store.cancelExpectedOwnMessageEcho(echoId)
+                sendError = error.localizedDescription
+            }
+        }
+    }
+
+    private func recall(_ message: NativeDisplayMessage) {
+        guard message.delivery == .sent,
+              message.record.isOwn,
+              message.record.recalledAt == nil,
+              recallingMessageId == nil
+        else { return }
+        recallingMessageId = message.record.id
+        let echoId = store.expectOwnMessageEcho(conversationId: conversation.id)
+        Task {
+            defer { recallingMessageId = nil }
+            do {
+                let recalled = try await store.api.recallMessage(
+                    conversationId: conversation.id,
+                    messageId: message.record.id
+                )
+                if let index = messages.firstIndex(where: { $0.record.id == recalled.id }) {
+                    messages[index] = NativeDisplayMessage(
+                        id: messages[index].id,
+                        record: recalled,
+                        delivery: .sent
+                    )
+                }
+            } catch {
+                store.cancelExpectedOwnMessageEcho(echoId)
+                sendError = error.localizedDescription
+            }
+        }
+    }
+
+    private func toggleMuted() {
+        guard !updatingMute else { return }
+        updatingMute = true
+        let target = !isMuted
+        Task {
+            defer { updatingMute = false }
+            do {
+                isMuted = try await store.api.setConversationMuted(
+                    conversationId: conversation.id,
+                    muted: target
+                )
+                await store.refresh()
+            } catch {
                 sendError = error.localizedDescription
             }
         }
@@ -1089,8 +1185,34 @@ private struct NativePagedEmojiPicker: View {
 private struct NativeMessageBubble: View {
     let message: NativeDisplayMessage
     let api: NativeMessageAPI
+    let isRecalling: Bool
+    let onRecall: () -> Void
 
+    @ViewBuilder
     var body: some View {
+        if message.record.recalledAt != nil {
+            HStack {
+                Spacer(minLength: 20)
+                Text(message.record.isOwn ? "You recalled a message" : "\(message.record.senderLabel) recalled a message")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.vertical, 3)
+                Spacer(minLength: 20)
+            }
+        } else if canRecall {
+            bubbleRow
+                .contextMenu {
+                    Button(role: .destructive, action: onRecall) {
+                        Label(isRecalling ? "Recalling..." : "Recall", systemImage: "arrow.uturn.backward")
+                    }
+                    .disabled(isRecalling)
+                }
+        } else {
+            bubbleRow
+        }
+    }
+
+    private var bubbleRow: some View {
         HStack(alignment: .top, spacing: 8) {
             if message.record.isOwn { Spacer(minLength: 48) }
             if !message.record.isOwn {
@@ -1118,6 +1240,10 @@ private struct NativeMessageBubble: View {
                 Spacer(minLength: 48)
             }
         }
+    }
+
+    private var canRecall: Bool {
+        message.record.isOwn && message.delivery == .sent
     }
 
     private var deliveryLabel: String {
@@ -1279,16 +1405,80 @@ final class NativeVoiceRecorder: NSObject, ObservableObject {
     }
 }
 
-private struct NativeVoiceRecordButton: View {
-    @ObservedObject var recorder: NativeVoiceRecorder
-    let onBegan: () -> Void
-    let onFinished: (NativeVoiceCapture) -> Void
-    @State private var holding = false
+private struct NativeVoiceRecordingOverlay: View {
+    let cancelArmed: Bool
 
     var body: some View {
-        Text(recorder.isRecording ? "Release to Send" : "Hold to Talk")
+        ZStack {
+            Color.black.opacity(0.68)
+                .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                Spacer()
+
+                VStack(spacing: -1) {
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .fill(cancelArmed ? Color(.systemRed) : Color(red: 0.43, green: 0.91, blue: 0.31))
+                        .frame(width: 184, height: 82)
+                        .overlay {
+                            Image(systemName: cancelArmed ? "xmark" : "waveform")
+                                .font(.system(size: 30, weight: .medium))
+                                .foregroundColor(cancelArmed ? .white : Color(red: 0.16, green: 0.48, blue: 0.12))
+                        }
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(cancelArmed ? Color(.systemRed) : Color(red: 0.43, green: 0.91, blue: 0.31))
+                        .frame(width: 18, height: 18)
+                        .rotationEffect(.degrees(45))
+                        .offset(y: -9)
+                }
+
+                Spacer()
+
+                HStack(spacing: 18) {
+                    Label("Cancel", systemImage: "xmark")
+                        .font(.headline)
+                        .foregroundColor(cancelArmed ? .white : Color(.systemGray5))
+                        .frame(maxWidth: .infinity, minHeight: 64)
+                        .background(cancelArmed ? Color(.systemRed).opacity(0.86) : Color.white.opacity(0.13))
+                        .clipShape(Capsule())
+
+                    Label(cancelArmed ? "Release to Cancel" : "Slide Up to Cancel", systemImage: "arrow.up")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity, minHeight: 64)
+                        .background(Color.white.opacity(0.13))
+                        .clipShape(Capsule())
+                }
+                .padding(.horizontal, 18)
+
+                Text(cancelArmed ? "Release to Cancel" : "Release to Send")
+                    .font(.title3.weight(.semibold))
+                    .foregroundColor(cancelArmed ? Color(.systemRed) : .primary)
+                    .frame(maxWidth: .infinity, minHeight: 104, alignment: .top)
+                    .padding(.top, 28)
+                    .background(.ultraThinMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 52, style: .continuous))
+                    .padding(.horizontal, -24)
+                    .padding(.top, 12)
+                    .padding(.bottom, -34)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(cancelArmed ? "Release to cancel voice message" : "Recording. Slide up to cancel or release to send")
+    }
+}
+
+private struct NativeVoiceRecordButton: View {
+    @ObservedObject var recorder: NativeVoiceRecorder
+    let onStateChanged: (_ active: Bool, _ cancelArmed: Bool) -> Void
+    let onFinished: (NativeVoiceCapture) -> Void
+    @State private var holding = false
+    @State private var cancelArmed = false
+
+    var body: some View {
+        Text(recorder.isRecording ? (cancelArmed ? "Release to Cancel" : "Release to Send") : "Hold to Talk")
             .font(.system(size: 16, weight: .medium))
-            .foregroundColor(recorder.isRecording ? .red : .primary)
+            .foregroundColor(recorder.isRecording && cancelArmed ? .red : .primary)
             .frame(maxWidth: .infinity, minHeight: 40)
             .background(recorder.isRecording || holding ? Color(.systemGray5) : Color(.systemBackground))
             .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
@@ -1299,21 +1489,47 @@ private struct NativeVoiceRecordButton: View {
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
-                    .onChanged { _ in
-                        guard !holding else { return }
-                        onBegan()
-                        holding = true
-                        Task {
-                            await recorder.start()
-                            if !holding { recorder.cancel() }
+                    .onChanged { value in
+                        let shouldCancel = isCancelGesture(value)
+                        if shouldCancel != cancelArmed {
+                            cancelArmed = shouldCancel
+                            onStateChanged(true, shouldCancel)
+                            if shouldCancel {
+                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                            }
+                        }
+                        if !holding {
+                            holding = true
+                            onStateChanged(true, shouldCancel)
+                            Task {
+                                await recorder.start()
+                                if !holding { recorder.cancel() }
+                            }
                         }
                     }
-                    .onEnded { _ in
+                    .onEnded { value in
+                        let shouldCancel = cancelArmed || isCancelGesture(value)
                         holding = false
-                        if let capture = recorder.stop() { onFinished(capture) }
+                        if shouldCancel {
+                            recorder.cancel()
+                        } else if let capture = recorder.stop() {
+                            onFinished(capture)
+                        }
+                        cancelArmed = false
+                        onStateChanged(false, false)
                     }
             )
+            .onDisappear {
+                holding = false
+                cancelArmed = false
+                recorder.cancel()
+                onStateChanged(false, false)
+            }
             .accessibilityLabel("Hold to record a voice message")
-            .accessibilityValue(recorder.isRecording ? "Recording" : "Ready")
+            .accessibilityValue(recorder.isRecording ? (cancelArmed ? "Release to cancel" : "Recording") : "Ready")
+    }
+
+    private func isCancelGesture(_ value: DragGesture.Value) -> Bool {
+        value.translation.height < -64 || value.translation.width < -72
     }
 }

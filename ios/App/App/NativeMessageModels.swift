@@ -42,6 +42,7 @@ struct NativeMessageRecord: Codable, Hashable, Identifiable {
     let mentions: [NativeMessageActor]?
     let readReceipts: [NativeMessageReadReceipt]?
     let voice: NativeMessageVoice?
+    let recalledAt: Double?
     let createdAt: Double
 
     var date: Date { Date(timeIntervalSince1970: createdAt / 1_000) }
@@ -62,6 +63,7 @@ struct NativeMessageConversation: Codable, Hashable, Identifiable {
     let latest: NativeMessageRecord?
     let unreadCount: Int
     let presence: NativeMessagePresence
+    let muted: Bool?
     let members: [NativeMessageMember]?
 
     var displayLabel: String { id == "family" ? "Family" : label }
@@ -81,9 +83,14 @@ struct NativeSendMessageResponse: Codable {
 }
 
 typealias NativeSendVoiceMessageResponse = NativeSendMessageResponse
+typealias NativeRecallMessageResponse = NativeSendMessageResponse
 
 struct NativeSeenMessageResponse: Codable {
     let seenThrough: String?
+}
+
+struct NativeSetConversationMutedResponse: Codable {
+    let muted: Bool
 }
 
 struct NativeParentSocketEvent: Codable {
@@ -98,4 +105,8 @@ struct NativeSendMessageBody: Codable {
 
 struct NativeSeenMessageBody: Codable {
     let messageId: String?
+}
+
+struct NativeSetConversationMutedBody: Codable {
+    let muted: Bool
 }
