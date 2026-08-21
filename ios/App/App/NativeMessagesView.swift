@@ -394,11 +394,11 @@ private struct NativeMessageTextField: UIViewRepresentable {
     @Binding var text: String
     @Binding var isFocused: Bool
     @Binding var height: CGFloat
+    let maximumHeight: CGFloat
     let onSubmit: () -> Void
     let onBeganEditing: () -> Void
 
     private let minimumHeight: CGFloat = 32
-    private let maximumHeight: CGFloat = 104
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -546,6 +546,14 @@ private struct NativeMessageThreadView: View {
         self.conversation = conversation
         self.store = store
         _isMuted = State(initialValue: conversation.muted == true)
+    }
+
+    private var maximumComposerTextHeight: CGFloat {
+        // Match the native Messages/WeChat pattern: grow with the content for
+        // roughly 10-12 lines, then keep the composer stable and scroll inside.
+        // Scaling from the current device height keeps compact phones usable
+        // while preventing the composer from taking over large screens.
+        min(260, max(180, floor(UIScreen.main.bounds.height * 0.30)))
     }
 
     var body: some View {
@@ -721,6 +729,7 @@ private struct NativeMessageThreadView: View {
                             text: $draft,
                             isFocused: $composerFocused,
                             height: $composerTextHeight,
+                            maximumHeight: maximumComposerTextHeight,
                             onSubmit: sendText,
                             onBeganEditing: { composerMode = .keyboard }
                         )
