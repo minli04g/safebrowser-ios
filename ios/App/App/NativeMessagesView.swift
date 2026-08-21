@@ -1,4 +1,5 @@
 import AVFoundation
+import Combine
 import SwiftUI
 import UIKit
 
@@ -443,6 +444,8 @@ private struct NativeMessageThreadView: View {
     @State private var recallingMessageId: String?
     @State private var isMuted: Bool
     @State private var updatingMute = false
+    @State private var recallEligibilityNow = Date()
+    private let recallEligibilityTimer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
     init(conversation: NativeMessageConversation, store: NativeMessageStore) {
         self.conversation = conversation
@@ -496,6 +499,7 @@ private struct NativeMessageThreadView: View {
             }
         }
         .task { await loadMessages() }
+        .onReceive(recallEligibilityTimer) { recallEligibilityNow = $0 }
         .onChange(of: store.changeVersion) { _ in
             guard store.changedConversationId == conversation.id else { return }
             Task { await loadMessages() }
@@ -527,6 +531,7 @@ private struct NativeMessageThreadView: View {
                         NativeMessageBubble(
                             message: message,
                             api: store.api,
+                            referenceDate: recallEligibilityNow,
                             isRecalling: recallingMessageId == message.record.id,
                             onRecall: { recall(message) }
                         )
@@ -942,6 +947,7 @@ private struct NativeMessageThreadView: View {
         guard message.delivery == .sent,
               message.record.isOwn,
               message.record.recalledAt == nil,
+              Date().timeIntervalSince1970 * 1_000 - message.record.createdAt <= 60 * 60 * 1_000,
               recallingMessageId == nil
         else { return }
         recallingMessageId = message.record.id
@@ -1185,6 +1191,7 @@ private struct NativePagedEmojiPicker: View {
 private struct NativeMessageBubble: View {
     let message: NativeDisplayMessage
     let api: NativeMessageAPI
+    let referenceDate: Date
     let isRecalling: Bool
     let onRecall: () -> Void
 
@@ -1243,7 +1250,8 @@ private struct NativeMessageBubble: View {
     }
 
     private var canRecall: Bool {
-        message.record.isOwn && message.delivery == .sent
+        let ageMs = referenceDate.timeIntervalSince1970 * 1_000 - message.record.createdAt
+        return message.record.isOwn && message.delivery == .sent && ageMs <= 60 * 60 * 1_000
     }
 
     private var deliveryLabel: String {
