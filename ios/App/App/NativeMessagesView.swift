@@ -339,77 +339,145 @@ private struct NativeKeyboardBackdrop: UIViewRepresentable {
     }
 }
 
+private final class NativeGrowingMessageTextView: UITextView {
+    let placeholderLabel = UILabel()
+    var onLayout: ((NativeGrowingMessageTextView) -> Void)?
+
+    override init(frame: CGRect, textContainer: NSTextContainer?) {
+        super.init(frame: frame, textContainer: textContainer)
+        placeholderLabel.translatesAutoresizingMaskIntoConstraints = false
+        placeholderLabel.text = "Write a message"
+        placeholderLabel.textColor = .placeholderText
+        placeholderLabel.numberOfLines = 1
+        placeholderLabel.adjustsFontForContentSizeCategory = true
+        addSubview(placeholderLabel)
+        NSLayoutConstraint.activate([
+            placeholderLabel.leadingAnchor.constraint(equalTo: leadingAnchor),
+            placeholderLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+            placeholderLabel.topAnchor.constraint(equalTo: topAnchor, constant: 5)
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        onLayout?(self)
+    }
+
+    func updatePlaceholder() {
+        placeholderLabel.isHidden = !text.isEmpty
+    }
+}
+
 private struct NativeMessageTextField: UIViewRepresentable {
     @Binding var text: String
     @Binding var isFocused: Bool
+    @Binding var height: CGFloat
     let onSubmit: () -> Void
     let onBeganEditing: () -> Void
+
+    private let minimumHeight: CGFloat = 32
+    private let maximumHeight: CGFloat = 104
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
     }
 
-    func makeUIView(context: Context) -> UITextField {
-        let textField = UITextField(frame: .zero)
-        textField.delegate = context.coordinator
-        textField.placeholder = "Write a message"
-        textField.returnKeyType = .send
-        textField.enablesReturnKeyAutomatically = true
-        textField.autocorrectionType = .yes
-        textField.borderStyle = .none
-        textField.backgroundColor = .clear
-        textField.font = .preferredFont(forTextStyle: .body)
-        textField.adjustsFontForContentSizeCategory = true
-        textField.setContentHuggingPriority(.required, for: .vertical)
-        textField.setContentCompressionResistancePriority(.required, for: .vertical)
-        textField.inputAccessoryView = NativeKeyboardEdgeAccessoryView(frame: .zero)
-        textField.addTarget(
-            context.coordinator,
-            action: #selector(Coordinator.textDidChange(_:)),
-            for: .editingChanged
-        )
-        return textField
+    func makeUIView(context: Context) -> NativeGrowingMessageTextView {
+        let textView = NativeGrowingMessageTextView(frame: .zero)
+        textView.delegate = context.coordinator
+        textView.returnKeyType = .send
+        textView.enablesReturnKeyAutomatically = true
+        textView.autocorrectionType = .yes
+        textView.backgroundColor = .clear
+        textView.font = .preferredFont(forTextStyle: .body)
+        textView.placeholderLabel.font = textView.font
+        textView.adjustsFontForContentSizeCategory = true
+        textView.textContainerInset = UIEdgeInsets(top: 5, left: 0, bottom: 5, right: 0)
+        textView.textContainer.lineFragmentPadding = 0
+        textView.isScrollEnabled = false
+        textView.showsVerticalScrollIndicator = false
+        textView.setContentHuggingPriority(.required, for: .vertical)
+        textView.setContentCompressionResistancePriority(.required, for: .vertical)
+        textView.inputAccessoryView = NativeKeyboardEdgeAccessoryView(frame: .zero)
+        textView.onLayout = { [weak coordinator = context.coordinator] view in
+            coordinator?.updateHeight(for: view)
+        }
+        textView.updatePlaceholder()
+        return textView
     }
 
-    func updateUIView(_ textField: UITextField, context: Context) {
+    func updateUIView(_ textView: NativeGrowingMessageTextView, context: Context) {
         context.coordinator.parent = self
-        if textField.markedTextRange == nil, textField.text != text {
-            textField.text = text
+        if textView.markedTextRange == nil, textView.text != text {
+            textView.text = text
+            textView.updatePlaceholder()
+            context.coordinator.updateHeight(for: textView)
         }
 
-        if isFocused, !textField.isFirstResponder {
+        if isFocused, !textView.isFirstResponder {
             DispatchQueue.main.async {
                 guard isFocused else { return }
-                textField.becomeFirstResponder()
+                textView.becomeFirstResponder()
             }
-        } else if !isFocused, textField.isFirstResponder {
-            textField.resignFirstResponder()
+        } else if !isFocused, textView.isFirstResponder {
+            textView.resignFirstResponder()
         }
     }
 
-    final class Coordinator: NSObject, UITextFieldDelegate {
+    final class Coordinator: NSObject, UITextViewDelegate {
         var parent: NativeMessageTextField
 
         init(parent: NativeMessageTextField) {
             self.parent = parent
         }
 
-        @objc func textDidChange(_ textField: UITextField) {
-            parent.text = textField.text ?? ""
+        func textViewDidChange(_ textView: UITextView) {
+            guard let textView = textView as? NativeGrowingMessageTextView else { return }
+            parent.text = textView.text ?? ""
+            textView.updatePlaceholder()
+            updateHeight(for: textView)
         }
 
-        func textFieldDidBeginEditing(_ textField: UITextField) {
+        func textViewDidBeginEditing(_ textView: UITextView) {
             if !parent.isFocused { parent.isFocused = true }
             parent.onBeganEditing()
         }
 
-        func textFieldDidEndEditing(_ textField: UITextField) {
+        func textViewDidEndEditing(_ textView: UITextView) {
             if parent.isFocused { parent.isFocused = false }
         }
 
-        func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+        func textView(
+            _ textView: UITextView,
+            shouldChangeTextIn range: NSRange,
+            replacementText replacement: String
+        ) -> Bool {
+            guard replacement == "\n", textView.markedTextRange == nil else { return true }
             parent.onSubmit()
             return false
+        }
+
+        func updateHeight(for textView: NativeGrowingMessageTextView) {
+            guard textView.bounds.width > 0 else { return }
+            let fittingSize = textView.sizeThatFits(
+                CGSize(width: textView.bounds.width, height: .greatestFiniteMagnitude)
+            )
+            let measuredHeight = ceil(fittingSize.height)
+            let targetHeight = min(parent.maximumHeight, max(parent.minimumHeight, measuredHeight))
+            let shouldScroll = measuredHeight > parent.maximumHeight
+            if textView.isScrollEnabled != shouldScroll {
+                textView.isScrollEnabled = shouldScroll
+            }
+
+            guard abs(parent.height - targetHeight) > 0.5 else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, abs(self.parent.height - targetHeight) > 0.5 else { return }
+                self.parent.height = targetHeight
+            }
         }
     }
 }
@@ -430,6 +498,7 @@ private struct NativeMessageThreadView: View {
     @State private var nextBefore: String?
     @State private var loading = false
     @State private var draft = ""
+    @State private var composerTextHeight: CGFloat = 32
     @State private var selectedMentions: [NativeMessageActor] = []
     @State private var sendError: String?
     @State private var composerMode: NativeComposerMode = .idle
@@ -564,6 +633,9 @@ private struct NativeMessageThreadView: View {
                     keepLatestVisibleAfterComposerChange(using: proxy)
                 }
             }
+            .onChange(of: composerTextHeight) { _ in
+                keepLatestVisibleAfterComposerChange(using: proxy)
+            }
             .onDisappear {
                 pendingScrollTask?.cancel()
                 keyboardScrollTask?.cancel()
@@ -618,19 +690,20 @@ private struct NativeMessageThreadView: View {
                     )
                     .layoutPriority(1)
                 } else {
-                    HStack(spacing: 6) {
+                    HStack(alignment: .bottom, spacing: 6) {
                         NativeMessageTextField(
                             text: $draft,
                             isFocused: $composerFocused,
+                            height: $composerTextHeight,
                             onSubmit: sendText,
                             onBeganEditing: { composerMode = .keyboard }
                         )
                         .frame(
                             minWidth: 0,
                             maxWidth: .infinity,
-                            minHeight: 32,
-                            idealHeight: 32,
-                            maxHeight: 32
+                            minHeight: composerTextHeight,
+                            idealHeight: composerTextHeight,
+                            maxHeight: composerTextHeight
                         )
                         Button {
                             toggleVoiceComposer()
