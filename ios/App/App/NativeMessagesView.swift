@@ -537,6 +537,7 @@ private struct NativeMessageThreadView: View {
     @State private var voiceRecordingActive = false
     @State private var voiceCancelArmed = false
     @State private var recallingMessageId: String?
+    @State private var actionMessageId: String?
     @State private var isMuted: Bool
     @State private var updatingMute = false
     @State private var recallEligibilityNow = Date()
@@ -635,9 +636,25 @@ private struct NativeMessageThreadView: View {
                             message: message,
                             api: store.api,
                             referenceDate: recallEligibilityNow,
+                            showsActionMenu: actionMessageId == message.record.id,
                             isRecalling: recallingMessageId == message.record.id,
-                            onRecall: { recall(message) }
+                            onShowActions: {
+                                dismissComposer()
+                                withAnimation(.easeOut(duration: 0.12)) {
+                                    actionMessageId = message.record.id
+                                }
+                            },
+                            onDismissActions: {
+                                withAnimation(.easeOut(duration: 0.12)) {
+                                    actionMessageId = nil
+                                }
+                            },
+                            onRecall: {
+                                actionMessageId = nil
+                                recall(message)
+                            }
                         )
+                        .zIndex(actionMessageId == message.record.id ? 20 : 0)
                     }
                     Color.clear.frame(height: 1).id("native-message-bottom")
                 }
@@ -650,6 +667,7 @@ private struct NativeMessageThreadView: View {
             .opacity(messages.isEmpty || hasScrolledToLatest ? 1 : 0)
             .background(Color(.systemGroupedBackground))
             .onTapGesture {
+                actionMessageId = nil
                 dismissComposer()
             }
             .onAppear { scrollToLatest(using: proxy) }
@@ -1301,8 +1319,15 @@ private struct NativeMessageBubble: View {
     let message: NativeDisplayMessage
     let api: NativeMessageAPI
     let referenceDate: Date
+    let showsActionMenu: Bool
     let isRecalling: Bool
+    let onShowActions: () -> Void
+    let onDismissActions: () -> Void
     let onRecall: () -> Void
+
+    @State private var transcript: String?
+    @State private var transcribing = false
+    @State private var transcriptFailed = false
 
     @ViewBuilder
     var body: some View {
@@ -1315,14 +1340,6 @@ private struct NativeMessageBubble: View {
                     .padding(.vertical, 3)
                 Spacer(minLength: 20)
             }
-        } else if canRecall {
-            bubbleRow
-                .contextMenu {
-                    Button(role: .destructive, action: onRecall) {
-                        Label(isRecalling ? "Recalling..." : "Recall", systemImage: "arrow.uturn.backward")
-                    }
-                    .disabled(isRecalling)
-                }
         } else {
             bubbleRow
         }
@@ -1336,18 +1353,42 @@ private struct NativeMessageBubble: View {
             }
             VStack(alignment: message.record.isOwn ? .trailing : .leading, spacing: 4) {
                 if let voice = message.record.voice {
-                    NativeVoicePlaybackButton(message: message.record, voice: voice, api: api)
+                    NativeVoicePlaybackButton(
+                        message: message.record,
+                        voice: voice,
+                        api: api,
+                        onLongPress: showActions
+                    )
+                    voiceTranscript
                 } else {
                     Text(message.record.text)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 9)
                         .background(message.record.isOwn ? Color.accentColor.opacity(0.18) : Color(.systemBackground))
                         .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .contentShape(Rectangle())
+                        .onLongPressGesture(minimumDuration: 0.42, maximumDistance: 18) {
+                            showActions()
+                        }
                 }
                 if message.record.isOwn {
                     Text(deliveryLabel)
                         .font(.caption2)
                         .foregroundColor(.secondary)
+                }
+            }
+            .overlay(alignment: message.record.isOwn ? .topTrailing : .topLeading) {
+                if showsActionMenu && hasActions {
+                    NativeMessageActionMenu(
+                        showsTranscribe: canTranscribe,
+                        showsRecall: canRecall,
+                        transcribing: transcribing,
+                        recalling: isRecalling,
+                        onTranscribe: transcribeVoice,
+                        onRecall: onRecall
+                    )
+                    .offset(x: message.record.isOwn ? -4 : 4, y: -62)
+                    .transition(.scale(scale: 0.96, anchor: .bottom).combined(with: .opacity))
                 }
             }
             if message.record.isOwn {
@@ -1363,6 +1404,84 @@ private struct NativeMessageBubble: View {
         return message.record.isOwn && message.delivery == .sent && ageMs <= 60 * 60 * 1_000
     }
 
+    private var canTranscribe: Bool {
+        message.record.voice != nil && transcript == nil && !transcribing
+    }
+
+    private var hasActions: Bool {
+        canTranscribe || canRecall
+    }
+
+    @ViewBuilder
+    private var voiceTranscript: some View {
+        if transcribing {
+            HStack(spacing: 7) {
+                ProgressView().controlSize(.mini)
+                Text("Transcribing...")
+            }
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+            .background(Color(.systemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        } else if let transcript {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Transcript")
+                    .font(.caption2.weight(.medium))
+                    .foregroundColor(.secondary)
+                Text(transcript)
+                    .font(.subheadline)
+                    .foregroundColor(.primary)
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+            .frame(maxWidth: 260, alignment: .leading)
+            .background(Color(.systemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .shadow(color: Color.black.opacity(0.05), radius: 1, y: 1)
+        } else if transcriptFailed {
+            Button("Transcription failed. Tap to retry") {
+                transcribeVoice()
+            }
+            .buttonStyle(.plain)
+            .font(.caption)
+            .foregroundColor(.red)
+        }
+    }
+
+    private func showActions() {
+        guard hasActions else { return }
+        onShowActions()
+    }
+
+    private func transcribeVoice() {
+        guard let voice = message.record.voice, !transcribing else { return }
+        onDismissActions()
+        transcriptFailed = false
+        if let cached = voice.transcript?.trimmingCharacters(in: .whitespacesAndNewlines), !cached.isEmpty {
+            transcript = cached
+            return
+        }
+        transcribing = true
+        Task { @MainActor in
+            defer { transcribing = false }
+            do {
+                let result = (try await api.transcribeVoiceMessage(
+                    conversationId: message.record.conversationId,
+                    messageId: message.record.id
+                )).trimmingCharacters(in: .whitespacesAndNewlines)
+                if result.isEmpty {
+                    transcriptFailed = true
+                } else {
+                    transcript = result
+                }
+            } catch {
+                transcriptFailed = true
+            }
+        }
+    }
+
     private var deliveryLabel: String {
         switch message.delivery {
         case .sending: return "Sending..."
@@ -1375,6 +1494,84 @@ private struct NativeMessageBubble: View {
             if read.isEmpty { return "Unread" }
             return "\(read.count)/\(receipts.count) read"
         }
+    }
+}
+
+private struct NativeMessageActionMenu: View {
+    let showsTranscribe: Bool
+    let showsRecall: Bool
+    let transcribing: Bool
+    let recalling: Bool
+    let onTranscribe: () -> Void
+    let onRecall: () -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            if showsTranscribe {
+                NativeMessageActionButton(
+                    title: transcribing ? "Transcribing..." : "Transcribe",
+                    systemImage: "doc.text",
+                    busy: transcribing,
+                    action: onTranscribe
+                )
+            }
+            if showsTranscribe && showsRecall {
+                Rectangle()
+                    .fill(Color.white.opacity(0.14))
+                    .frame(width: 0.5, height: 32)
+            }
+            if showsRecall {
+                NativeMessageActionButton(
+                    title: recalling ? "Recalling..." : "Recall",
+                    systemImage: "arrow.uturn.backward",
+                    busy: recalling,
+                    action: onRecall
+                )
+            }
+        }
+        .padding(.horizontal, 3)
+        .background(Color(white: 0.29))
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color(white: 0.29))
+                .frame(width: 12, height: 12)
+                .rotationEffect(.degrees(45))
+                .offset(y: 6)
+        }
+        .shadow(color: Color.black.opacity(0.24), radius: 12, y: 5)
+    }
+}
+
+private struct NativeMessageActionButton: View {
+    let title: String
+    let systemImage: String
+    let busy: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                if busy {
+                    ProgressView()
+                        .tint(.white)
+                        .scaleEffect(0.65)
+                        .frame(width: 14, height: 14)
+                } else {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 13, weight: .regular))
+                        .frame(width: 14, height: 14)
+                }
+                Text(title)
+                    .font(.caption2)
+                    .lineLimit(1)
+            }
+            .foregroundColor(.white)
+            .frame(width: 72, height: 52)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
     }
 }
 
@@ -1403,22 +1600,29 @@ private struct NativeVoicePlaybackButton: View {
     let message: NativeMessageRecord
     let voice: NativeMessageVoice
     let api: NativeMessageAPI
+    let onLongPress: () -> Void
     @StateObject private var player = NativeVoicePlayer()
 
     var body: some View {
-        Button {
-            Task { await player.toggle(message: message, api: api) }
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: player.isPlaying ? "pause.fill" : "waveform")
-                Text("\(max(1, Int(round(Double(voice.durationMs) / 1_000))))s")
-            }
-            .padding(.horizontal, 14)
-            .frame(height: 40)
-            .background(message.isOwn ? Color.accentColor.opacity(0.18) : Color(.systemBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+        HStack(spacing: 8) {
+            Image(systemName: player.isPlaying ? "pause.fill" : "waveform")
+            Text("\(max(1, Int(round(Double(voice.durationMs) / 1_000))))s")
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 14)
+        .frame(height: 40)
+        .background(message.isOwn ? Color.accentColor.opacity(0.18) : Color(.systemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            Task { await player.toggle(message: message, api: api) }
+        }
+        .onLongPressGesture(minimumDuration: 0.42, maximumDistance: 18, perform: onLongPress)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel("Voice message, \(max(1, Int(round(Double(voice.durationMs) / 1_000)))) seconds")
+        .accessibilityAction {
+            Task { await player.toggle(message: message, api: api) }
+        }
     }
 }
 

@@ -85,6 +85,10 @@ struct NativeSendMessageResponse: Codable {
 typealias NativeSendVoiceMessageResponse = NativeSendMessageResponse
 typealias NativeRecallMessageResponse = NativeSendMessageResponse
 
+struct NativeVoiceTranscriptResponse: Codable {
+    let transcript: String
+}
+
 struct NativeSeenMessageResponse: Codable {
     let seenThrough: String?
 }

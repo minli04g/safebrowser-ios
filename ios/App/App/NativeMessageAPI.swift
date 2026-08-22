@@ -137,6 +137,14 @@ final class NativeMessageAPI {
         return response.message
     }
 
+    func transcribeVoiceMessage(conversationId: String, messageId: String) async throws -> String {
+        let response: NativeVoiceTranscriptResponse = try await request(
+            path: "/v1/messages/conversations/\(encodePath(conversationId))/voice/\(encodePath(messageId))/transcript",
+            method: "POST"
+        )
+        return response.transcript
+    }
+
     func voiceData(conversationId: String, messageId: String) async throws -> Data {
         try await requestData(
             path: "/v1/messages/conversations/\(encodePath(conversationId))/voice/\(encodePath(messageId))"
