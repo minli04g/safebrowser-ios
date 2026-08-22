@@ -644,14 +644,25 @@ private struct NativeRequestSummaryCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(request.deviceName)
-                        .font(.headline)
+                HStack(alignment: .center, spacing: 9) {
+                    Image(systemName: "person.crop.circle.fill")
+                        .font(.title3)
+                        .foregroundColor(.secondary)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("REQUESTED BY")
+                            .font(.caption2.weight(.bold))
+                            .foregroundColor(.secondary)
+                            .tracking(0.7)
+                        Text(request.deviceName)
+                            .font(.headline)
+                            .lineLimit(1)
+                    }
                     Spacer(minLength: 12)
                     Text(relativeTime(request.createdAt))
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
+                .accessibilityElement(children: .combine)
                 HStack(spacing: 7) {
                     Text("PENDING")
                         .font(.caption2.weight(.bold))
