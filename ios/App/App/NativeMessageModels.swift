@@ -32,6 +32,13 @@ struct NativeMessageVoice: Codable, Hashable {
     let transcript: String?
 }
 
+struct NativeMessageImage: Codable, Hashable {
+    let url: String
+    let mimeType: String
+    let sizeBytes: Int
+    let filename: String
+}
+
 struct NativeMessageRecord: Codable, Hashable, Identifiable {
     let id: String
     let conversationId: String
@@ -42,6 +49,7 @@ struct NativeMessageRecord: Codable, Hashable, Identifiable {
     let mentions: [NativeMessageActor]?
     let readReceipts: [NativeMessageReadReceipt]?
     let voice: NativeMessageVoice?
+    let image: NativeMessageImage?
     let recalledAt: Double?
     let createdAt: Double
 
@@ -83,6 +91,7 @@ struct NativeSendMessageResponse: Codable {
 }
 
 typealias NativeSendVoiceMessageResponse = NativeSendMessageResponse
+typealias NativeSendImageMessageResponse = NativeSendMessageResponse
 typealias NativeRecallMessageResponse = NativeSendMessageResponse
 
 struct NativeVoiceTranscriptResponse: Codable {

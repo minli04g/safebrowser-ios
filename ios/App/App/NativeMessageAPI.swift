@@ -129,6 +129,24 @@ final class NativeMessageAPI {
         return response.message
     }
 
+    func sendImageMessage(
+        conversationId: String,
+        data: Data,
+        mimeType: String,
+        filename: String
+    ) async throws -> NativeMessageRecord {
+        let response: NativeSendImageMessageResponse = try await request(
+            path: "/v1/messages/conversations/\(encodePath(conversationId))/image",
+            method: "POST",
+            body: data,
+            headers: [
+                "Content-Type": mimeType,
+                "X-Image-File-Name": encodeHeaderValue(filename)
+            ]
+        )
+        return response.message
+    }
+
     func recallMessage(conversationId: String, messageId: String) async throws -> NativeMessageRecord {
         let response: NativeRecallMessageResponse = try await request(
             path: "/v1/messages/conversations/\(encodePath(conversationId))/messages/\(encodePath(messageId))/recall",
@@ -148,6 +166,12 @@ final class NativeMessageAPI {
     func voiceData(conversationId: String, messageId: String) async throws -> Data {
         try await requestData(
             path: "/v1/messages/conversations/\(encodePath(conversationId))/voice/\(encodePath(messageId))"
+        )
+    }
+
+    func imageData(conversationId: String, messageId: String) async throws -> Data {
+        try await requestData(
+            path: "/v1/messages/conversations/\(encodePath(conversationId))/image/\(encodePath(messageId))"
         )
     }
 
@@ -232,6 +256,12 @@ final class NativeMessageAPI {
 
     private func encodeQuery(_ value: String) -> String {
         value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? value
+    }
+
+    private func encodeHeaderValue(_ value: String) -> String {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? "image"
     }
 }
 

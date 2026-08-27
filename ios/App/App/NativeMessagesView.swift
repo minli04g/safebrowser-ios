@@ -1,7 +1,9 @@
 import AVFoundation
 import Combine
+import PhotosUI
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 @MainActor
 final class NativeMessageStore: ObservableObject {
@@ -290,7 +292,7 @@ private struct NativeConversationRow: View {
 
     private var preview: String {
         guard let message = conversation.latest else { return "No messages yet" }
-        let content = message.voice == nil ? message.text : "Voice message"
+        let content = message.image != nil ? "Image" : message.voice == nil ? message.text : "Voice message"
         if message.isOwn { return "You: \(content)" }
         if conversation.kind == "family" { return "\(message.senderLabel): \(content)" }
         return content
@@ -527,6 +529,8 @@ private struct NativeMessageThreadView: View {
     @State private var composerTextHeight: CGFloat = 32
     @State private var selectedMentions: [NativeMessageActor] = []
     @State private var sendError: String?
+    @State private var showingImagePicker = false
+    @State private var sendingImage = false
     @State private var composerMode: NativeComposerMode = .idle
     @State private var emojiPage = 0
     @State private var hasScrolledToLatest = false
@@ -615,6 +619,14 @@ private struct NativeMessageThreadView: View {
             Button("OK", role: .cancel) { sendError = nil }
         } message: {
             Text(sendError ?? "Unknown error")
+        }
+        .sheet(isPresented: $showingImagePicker) {
+            NativeImagePicker(isPresented: $showingImagePicker) { result in
+                switch result {
+                case .success(let image): sendImage(image)
+                case .failure(let error): sendError = error.localizedDescription
+                }
+            }
         }
     }
 
@@ -810,6 +822,12 @@ private struct NativeMessageThreadView: View {
                 NativeMessageMorePanel(
                     showsMention: conversation.kind == "family",
                     onMention: beginMention,
+                    imageBusy: sendingImage,
+                    onImage: {
+                        composerFocused = false
+                        composerMode = .idle
+                        showingImagePicker = true
+                    },
                     onVoice: {
                         composerFocused = false
                         withAnimation(.easeInOut(duration: 0.16)) {
@@ -1020,6 +1038,7 @@ private struct NativeMessageThreadView: View {
             mentions: selectedMentions.isEmpty ? nil : selectedMentions,
             readReceipts: nil,
             voice: nil,
+            image: nil,
             recalledAt: nil,
             createdAt: Date().timeIntervalSince1970 * 1_000
         )
@@ -1059,6 +1078,33 @@ private struct NativeMessageThreadView: View {
                     conversationId: conversation.id,
                     data: capture.data,
                     durationMs: capture.durationMs
+                )
+                if !messages.contains(where: { $0.id == sent.id }) {
+                    messages.append(NativeDisplayMessage(id: sent.id, record: sent, delivery: .sent))
+                }
+            } catch {
+                store.cancelExpectedOwnMessageEcho(echoId)
+                sendError = error.localizedDescription
+            }
+        }
+    }
+
+    private func sendImage(_ selected: NativeSelectedImage) {
+        guard !sendingImage else { return }
+        guard selected.data.count > 0, selected.data.count <= 10 * 1024 * 1024 else {
+            sendError = "Images must be 10 MB or smaller."
+            return
+        }
+        sendingImage = true
+        let echoId = store.expectOwnMessageEcho(conversationId: conversation.id)
+        Task {
+            defer { sendingImage = false }
+            do {
+                let sent = try await store.api.sendImageMessage(
+                    conversationId: conversation.id,
+                    data: selected.data,
+                    mimeType: selected.mimeType,
+                    filename: selected.filename
                 )
                 if !messages.contains(where: { $0.id == sent.id }) {
                     messages.append(NativeDisplayMessage(id: sent.id, record: sent, delivery: .sent))
@@ -1119,9 +1165,265 @@ private struct NativeMessageThreadView: View {
     }
 }
 
+private struct NativeSelectedImage {
+    let data: Data
+    let mimeType: String
+    let filename: String
+}
+
+private enum NativeImagePickerError: LocalizedError {
+    case unsupported
+    case unreadable
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupported: return "Choose a JPEG, PNG, GIF, or WebP image."
+        case .unreadable: return "The selected image could not be read."
+        }
+    }
+}
+
+private struct NativeImagePicker: UIViewControllerRepresentable {
+    @Binding var isPresented: Bool
+    let completion: (Result<NativeSelectedImage, Error>) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+
+    func makeUIViewController(context: Context) -> PHPickerViewController {
+        var configuration = PHPickerConfiguration()
+        configuration.filter = .images
+        configuration.selectionLimit = 1
+        configuration.preferredAssetRepresentationMode = .compatible
+        let picker = PHPickerViewController(configuration: configuration)
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: PHPickerViewController, context: Context) {}
+
+    final class Coordinator: NSObject, PHPickerViewControllerDelegate {
+        private let parent: NativeImagePicker
+
+        init(parent: NativeImagePicker) { self.parent = parent }
+
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            guard let provider = results.first?.itemProvider else {
+                parent.isPresented = false
+                picker.dismiss(animated: true)
+                return
+            }
+            let representations: [(type: UTType, mime: String, ext: String)] = [
+                (.jpeg, "image/jpeg", "jpg"),
+                (.png, "image/png", "png"),
+                (.gif, "image/gif", "gif"),
+                (UTType(filenameExtension: "webp") ?? .image, "image/webp", "webp")
+            ]
+            let originalRepresentation = representations.first(where: {
+                provider.registeredTypeIdentifiers.contains($0.type.identifier)
+            })
+            if let representation = originalRepresentation ?? representations.first(where: {
+                provider.hasItemConformingToTypeIdentifier($0.type.identifier)
+            }) {
+                provider.loadFileRepresentation(forTypeIdentifier: representation.type.identifier) { [weak self, weak picker] url, error in
+                    guard let self else { return }
+                    let result: Result<NativeSelectedImage, Error>
+                    if let url, let data = try? Data(contentsOf: url), !data.isEmpty {
+                        result = .success(NativeSelectedImage(
+                            data: data,
+                            mimeType: representation.mime,
+                            filename: self.filename(provider.suggestedName, extension: representation.ext)
+                        ))
+                    } else {
+                        result = .failure(error ?? NativeImagePickerError.unreadable)
+                    }
+                    DispatchQueue.main.async {
+                        self.parent.isPresented = false
+                        picker?.dismiss(animated: true)
+                        self.parent.completion(result)
+                    }
+                }
+                return
+            }
+            guard provider.canLoadObject(ofClass: UIImage.self) else {
+                parent.isPresented = false
+                picker.dismiss(animated: true)
+                parent.completion(.failure(NativeImagePickerError.unsupported))
+                return
+            }
+            provider.loadObject(ofClass: UIImage.self) { [weak self, weak picker] object, error in
+                guard let self else { return }
+                let result: Result<NativeSelectedImage, Error>
+                if let image = object as? UIImage, let data = image.jpegData(compressionQuality: 1), !data.isEmpty {
+                    result = .success(NativeSelectedImage(
+                        data: data,
+                        mimeType: "image/jpeg",
+                        filename: self.filename(provider.suggestedName, extension: "jpg")
+                    ))
+                } else {
+                    result = .failure(error ?? NativeImagePickerError.unreadable)
+                }
+                DispatchQueue.main.async {
+                    self.parent.isPresented = false
+                    picker?.dismiss(animated: true)
+                    self.parent.completion(result)
+                }
+            }
+        }
+
+        private func filename(_ suggestedName: String?, extension fileExtension: String) -> String {
+            let raw = suggestedName?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let fallback = raw?.isEmpty == false ? raw! : "image"
+            let base = (fallback as NSString).deletingPathExtension
+            return "\(base.isEmpty ? "image" : base).\(fileExtension)"
+        }
+    }
+}
+
+@MainActor
+private final class NativeMessageImageLoader: ObservableObject {
+    @Published private(set) var data: Data?
+    @Published private(set) var image: UIImage?
+    @Published private(set) var failed = false
+    private var task: Task<Void, Never>?
+    private var messageId: String?
+
+    func load(message: NativeMessageRecord, api: NativeMessageAPI) {
+        if messageId == message.id, data != nil { return }
+        task?.cancel()
+        messageId = message.id
+        data = nil
+        image = nil
+        failed = false
+        task = Task { @MainActor in
+            do {
+                let loaded = try await api.imageData(conversationId: message.conversationId, messageId: message.id)
+                guard !Task.isCancelled, messageId == message.id, let decoded = UIImage(data: loaded) else { return }
+                data = loaded
+                image = decoded
+            } catch {
+                guard !Task.isCancelled, messageId == message.id else { return }
+                failed = true
+            }
+        }
+    }
+
+    func cancel() {
+        task?.cancel()
+        task = nil
+    }
+}
+
+private struct NativeMessageImageThumbnail: View {
+    let message: NativeMessageRecord
+    let metadata: NativeMessageImage
+    let api: NativeMessageAPI
+    let onLongPress: () -> Void
+    @StateObject private var loader = NativeMessageImageLoader()
+    @State private var showsPreview = false
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(Color(.secondarySystemBackground))
+            if let image = loader.image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else if loader.failed {
+                VStack(spacing: 6) {
+                    Image(systemName: "photo")
+                    Text("Image unavailable").font(.caption2)
+                }
+                .foregroundColor(.secondary)
+            } else {
+                ProgressView()
+            }
+        }
+        .frame(width: 200, height: 140)
+        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .contentShape(Rectangle())
+        .onTapGesture { if loader.image != nil { showsPreview = true } }
+        .onLongPressGesture(minimumDuration: 0.42, maximumDistance: 18, perform: onLongPress)
+        .onAppear { loader.load(message: message, api: api) }
+        .onDisappear { loader.cancel() }
+        .fullScreenCover(isPresented: $showsPreview) {
+            if let data = loader.data, let image = loader.image {
+                NativeMessageImagePreview(data: data, image: image, metadata: metadata)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel("Image \(metadata.filename)")
+        .accessibilityHint("Opens the full-size image")
+        .accessibilityAction { if loader.image != nil { showsPreview = true } }
+    }
+}
+
+private struct NativeMessageImagePreview: View {
+    let data: Data
+    let image: UIImage
+    let metadata: NativeMessageImage
+    @Environment(\.presentationMode) private var presentationMode
+    @State private var exporting = false
+
+    private var contentType: UTType {
+        UTType(mimeType: metadata.mimeType) ?? .data
+    }
+
+    var body: some View {
+        NavigationView {
+            ZStack {
+                Color.black.ignoresSafeArea()
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .accessibilityLabel(metadata.filename)
+            }
+            .navigationTitle(metadata.filename)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Close") { presentationMode.wrappedValue.dismiss() }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        exporting = true
+                    } label: {
+                        Label("Download Original", systemImage: "square.and.arrow.down")
+                    }
+                }
+            }
+        }
+        .navigationViewStyle(.stack)
+        .fileExporter(
+            isPresented: $exporting,
+            document: NativeImageFileDocument(data: data),
+            contentType: contentType,
+            defaultFilename: metadata.filename
+        ) { _ in }
+    }
+}
+
+private struct NativeImageFileDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.jpeg, .png, .gif, UTType(filenameExtension: "webp") ?? .image, .data] }
+    let data: Data
+
+    init(data: Data) { self.data = data }
+
+    init(configuration: ReadConfiguration) throws {
+        data = configuration.file.regularFileContents ?? Data()
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
+    }
+}
+
 private struct NativeMessageMorePanel: View {
     let showsMention: Bool
     let onMention: () -> Void
+    let imageBusy: Bool
+    let onImage: () -> Void
     let onVoice: () -> Void
 
     var body: some View {
@@ -1133,6 +1435,12 @@ private struct NativeMessageMorePanel: View {
                     action: onMention
                 )
             }
+            NativeMessageMoreAction(
+                title: imageBusy ? "Sending..." : "Image",
+                systemImage: "photo",
+                action: onImage
+            )
+            .disabled(imageBusy)
             NativeMessageMoreAction(
                 title: "Voice",
                 systemImage: "mic.fill",
@@ -1352,7 +1660,14 @@ private struct NativeMessageBubble: View {
                 NativeAvatar(url: api.absoluteURL(message.record.senderAvatarUrl), label: message.record.senderLabel, size: 34)
             }
             VStack(alignment: message.record.isOwn ? .trailing : .leading, spacing: 4) {
-                if let voice = message.record.voice {
+                if let image = message.record.image {
+                    NativeMessageImageThumbnail(
+                        message: message.record,
+                        metadata: image,
+                        api: api,
+                        onLongPress: showActions
+                    )
+                } else if let voice = message.record.voice {
                     NativeVoicePlaybackButton(
                         message: message.record,
                         voice: voice,
