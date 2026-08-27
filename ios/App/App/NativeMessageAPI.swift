@@ -175,6 +175,12 @@ final class NativeMessageAPI {
         )
     }
 
+    func imageThumbnailData(conversationId: String, messageId: String) async throws -> Data {
+        try await requestData(
+            path: "/v1/messages/conversations/\(encodePath(conversationId))/image/\(encodePath(messageId))/thumbnail"
+        )
+    }
+
     func makeParentWebSocket() async throws -> URLSessionWebSocketTask {
         var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
         components?.scheme = baseURL.scheme == "https" ? "wss" : "ws"

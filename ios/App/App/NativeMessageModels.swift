@@ -34,6 +34,8 @@ struct NativeMessageVoice: Codable, Hashable {
 
 struct NativeMessageImage: Codable, Hashable {
     let url: String
+    let thumbnailUrl: String?
+    let thumbnailSizeBytes: Int?
     let mimeType: String
     let sizeBytes: Int
     let filename: String

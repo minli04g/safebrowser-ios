@@ -309,6 +309,14 @@ private struct NativeDisplayMessage: Identifiable, Equatable {
     let id: String
     var record: NativeMessageRecord
     var delivery: NativeDeliveryState
+    var localImage: NativeSelectedImage?
+
+    init(id: String, record: NativeMessageRecord, delivery: NativeDeliveryState, localImage: NativeSelectedImage? = nil) {
+        self.id = id
+        self.record = record
+        self.delivery = delivery
+        self.localImage = localImage
+    }
 }
 
 private final class NativeKeyboardEdgeAccessoryView: UIVisualEffectView {
@@ -664,6 +672,9 @@ private struct NativeMessageThreadView: View {
                             onRecall: {
                                 actionMessageId = nil
                                 recall(message)
+                            },
+                            onRetryImage: {
+                                retryImage(message)
                             }
                         )
                         .zIndex(actionMessageId == message.record.id ? 20 : 0)
@@ -1095,7 +1106,49 @@ private struct NativeMessageThreadView: View {
             sendError = "Images must be 10 MB or smaller."
             return
         }
+        let clientId = "local-image-\(UUID().uuidString)"
+        let optimistic = NativeMessageRecord(
+            id: clientId,
+            conversationId: conversation.id,
+            actor: NativeMessageActor(kind: "parent", deviceId: nil),
+            senderLabel: "Parent",
+            senderAvatarUrl: nil,
+            text: "",
+            mentions: nil,
+            readReceipts: nil,
+            voice: nil,
+            image: NativeMessageImage(
+                url: "",
+                thumbnailUrl: nil,
+                thumbnailSizeBytes: nil,
+                mimeType: selected.mimeType,
+                sizeBytes: selected.data.count,
+                filename: selected.filename
+            ),
+            recalledAt: nil,
+            createdAt: Date().timeIntervalSince1970 * 1_000
+        )
+        messages.append(NativeDisplayMessage(
+            id: clientId,
+            record: optimistic,
+            delivery: .sending,
+            localImage: selected
+        ))
+        uploadImage(clientId: clientId)
+    }
+
+    private func retryImage(_ message: NativeDisplayMessage) {
+        guard message.delivery == .failed, message.localImage != nil, !sendingImage else { return }
+        uploadImage(clientId: message.id)
+    }
+
+    private func uploadImage(clientId: String) {
+        guard !sendingImage,
+              let index = messages.firstIndex(where: { $0.id == clientId }),
+              let selected = messages[index].localImage
+        else { return }
         sendingImage = true
+        messages[index].delivery = .sending
         let echoId = store.expectOwnMessageEcho(conversationId: conversation.id)
         Task {
             defer { sendingImage = false }
@@ -1106,12 +1159,17 @@ private struct NativeMessageThreadView: View {
                     mimeType: selected.mimeType,
                     filename: selected.filename
                 )
-                if !messages.contains(where: { $0.id == sent.id }) {
+                messages.removeAll { $0.id != clientId && $0.record.id == sent.id }
+                if let sentIndex = messages.firstIndex(where: { $0.id == clientId }) {
+                    messages[sentIndex] = NativeDisplayMessage(id: clientId, record: sent, delivery: .sent)
+                } else if !messages.contains(where: { $0.record.id == sent.id }) {
                     messages.append(NativeDisplayMessage(id: sent.id, record: sent, delivery: .sent))
                 }
             } catch {
                 store.cancelExpectedOwnMessageEcho(echoId)
-                sendError = error.localizedDescription
+                if let failedIndex = messages.firstIndex(where: { $0.id == clientId }) {
+                    messages[failedIndex].delivery = .failed
+                }
             }
         }
     }
@@ -1165,7 +1223,7 @@ private struct NativeMessageThreadView: View {
     }
 }
 
-private struct NativeSelectedImage {
+private struct NativeSelectedImage: Equatable {
     let data: Data
     let mimeType: String
     let filename: String
@@ -1281,24 +1339,34 @@ private struct NativeImagePicker: UIViewControllerRepresentable {
 
 @MainActor
 private final class NativeMessageImageLoader: ObservableObject {
-    @Published private(set) var data: Data?
     @Published private(set) var image: UIImage?
     @Published private(set) var failed = false
     private var task: Task<Void, Never>?
     private var messageId: String?
 
-    func load(message: NativeMessageRecord, api: NativeMessageAPI) {
-        if messageId == message.id, data != nil { return }
+    func load(message: NativeMessageRecord, metadata: NativeMessageImage, localData: Data?, api: NativeMessageAPI) {
+        if messageId == message.id, image != nil { return }
         task?.cancel()
         messageId = message.id
-        data = nil
         image = nil
         failed = false
+        if let localData, let decoded = UIImage(data: localData) {
+            image = decoded
+            return
+        }
         task = Task { @MainActor in
             do {
-                let loaded = try await api.imageData(conversationId: message.conversationId, messageId: message.id)
+                let loaded: Data
+                if metadata.thumbnailUrl != nil {
+                    do {
+                        loaded = try await api.imageThumbnailData(conversationId: message.conversationId, messageId: message.id)
+                    } catch {
+                        loaded = try await api.imageData(conversationId: message.conversationId, messageId: message.id)
+                    }
+                } else {
+                    loaded = try await api.imageData(conversationId: message.conversationId, messageId: message.id)
+                }
                 guard !Task.isCancelled, messageId == message.id, let decoded = UIImage(data: loaded) else { return }
-                data = loaded
                 image = decoded
             } catch {
                 guard !Task.isCancelled, messageId == message.id else { return }
@@ -1317,6 +1385,9 @@ private struct NativeMessageImageThumbnail: View {
     let message: NativeMessageRecord
     let metadata: NativeMessageImage
     let api: NativeMessageAPI
+    let localData: Data?
+    let delivery: NativeDeliveryState
+    let onRetry: () -> Void
     let onLongPress: () -> Void
     @StateObject private var loader = NativeMessageImageLoader()
     @State private var showsPreview = false
@@ -1338,32 +1409,65 @@ private struct NativeMessageImageThumbnail: View {
             } else {
                 ProgressView()
             }
+            if delivery == .sending {
+                ZStack {
+                    Circle().fill(Color.black.opacity(0.54))
+                    ProgressView().tint(.white)
+                }
+                .frame(width: 42, height: 42)
+            }
         }
         .frame(width: 200, height: 140)
         .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
         .contentShape(Rectangle())
-        .onTapGesture { if loader.image != nil { showsPreview = true } }
+        .onTapGesture {
+            if delivery == .failed {
+                onRetry()
+            } else if delivery == .sent, loader.image != nil {
+                showsPreview = true
+            }
+        }
         .onLongPressGesture(minimumDuration: 0.42, maximumDistance: 18, perform: onLongPress)
-        .onAppear { loader.load(message: message, api: api) }
+        .overlay(alignment: .leading) {
+            if delivery == .failed {
+                Button(action: onRetry) {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .font(.system(size: 24, weight: .semibold))
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(Color.white, Color(.systemRed))
+                        .background(Circle().fill(Color(.systemBackground)))
+                }
+                .buttonStyle(.plain)
+                .offset(x: -31)
+                .accessibilityLabel("Retry sending image")
+            }
+        }
+        .onAppear { loader.load(message: message, metadata: metadata, localData: localData, api: api) }
+        .onChange(of: message.id) { _ in loader.load(message: message, metadata: metadata, localData: localData, api: api) }
         .onDisappear { loader.cancel() }
         .fullScreenCover(isPresented: $showsPreview) {
-            if let data = loader.data, let image = loader.image {
-                NativeMessageImagePreview(data: data, image: image, metadata: metadata)
-            }
+            NativeMessageImagePreview(message: message, metadata: metadata, api: api)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel("Image \(metadata.filename)")
-        .accessibilityHint("Opens the full-size image")
-        .accessibilityAction { if loader.image != nil { showsPreview = true } }
+        .accessibilityHint(delivery == .failed ? "Retries sending the image" : delivery == .sending ? "Image is uploading" : "Opens the full-size image")
+        .accessibilityAction {
+            if delivery == .failed { onRetry() }
+            else if delivery == .sent, loader.image != nil { showsPreview = true }
+        }
     }
 }
 
 private struct NativeMessageImagePreview: View {
-    let data: Data
-    let image: UIImage
+    let message: NativeMessageRecord
     let metadata: NativeMessageImage
+    let api: NativeMessageAPI
     @Environment(\.presentationMode) private var presentationMode
+    @State private var data: Data?
+    @State private var image: UIImage?
+    @State private var loading = false
+    @State private var failed = false
     @State private var exporting = false
 
     private var contentType: UTType {
@@ -1374,10 +1478,23 @@ private struct NativeMessageImagePreview: View {
         NavigationView {
             ZStack {
                 Color.black.ignoresSafeArea()
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .accessibilityLabel(metadata.filename)
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .accessibilityLabel(metadata.filename)
+                } else if failed {
+                    Button {
+                        Task { await loadOriginal() }
+                    } label: {
+                        Label("Image unavailable. Retry", systemImage: "arrow.clockwise")
+                    }
+                    .foregroundColor(.white)
+                } else {
+                    ProgressView("Loading original...")
+                        .tint(.white)
+                        .foregroundColor(.white)
+                }
             }
             .navigationTitle(metadata.filename)
             .navigationBarTitleDisplayMode(.inline)
@@ -1391,16 +1508,37 @@ private struct NativeMessageImagePreview: View {
                     } label: {
                         Label("Download Original", systemImage: "square.and.arrow.down")
                     }
+                    .disabled(data == nil)
                 }
             }
         }
         .navigationViewStyle(.stack)
+        .task { await loadOriginal() }
         .fileExporter(
             isPresented: $exporting,
-            document: NativeImageFileDocument(data: data),
+            document: NativeImageFileDocument(data: data ?? Data()),
             contentType: contentType,
             defaultFilename: metadata.filename
         ) { _ in }
+    }
+
+    @MainActor
+    private func loadOriginal() async {
+        guard !loading, data == nil else { return }
+        loading = true
+        failed = false
+        defer { loading = false }
+        do {
+            let loaded = try await api.imageData(conversationId: message.conversationId, messageId: message.id)
+            guard let decoded = UIImage(data: loaded) else {
+                failed = true
+                return
+            }
+            data = loaded
+            image = decoded
+        } catch {
+            failed = true
+        }
     }
 }
 
@@ -1632,6 +1770,7 @@ private struct NativeMessageBubble: View {
     let onShowActions: () -> Void
     let onDismissActions: () -> Void
     let onRecall: () -> Void
+    let onRetryImage: () -> Void
 
     @State private var transcript: String?
     @State private var transcribing = false
@@ -1665,6 +1804,9 @@ private struct NativeMessageBubble: View {
                         message: message.record,
                         metadata: image,
                         api: api,
+                        localData: message.localImage?.data,
+                        delivery: message.delivery,
+                        onRetry: onRetryImage,
                         onLongPress: showActions
                     )
                 } else if let voice = message.record.voice {
@@ -1689,7 +1831,7 @@ private struct NativeMessageBubble: View {
                 if message.record.isOwn {
                     Text(deliveryLabel)
                         .font(.caption2)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(message.delivery == .failed ? Color(.systemRed) : .secondary)
                 }
             }
             .overlay(alignment: message.record.isOwn ? .topTrailing : .topLeading) {
@@ -1800,7 +1942,7 @@ private struct NativeMessageBubble: View {
     private var deliveryLabel: String {
         switch message.delivery {
         case .sending: return "Sending..."
-        case .failed: return "Failed"
+        case .failed: return "Tap to retry"
         case .sent:
             guard let receipts = message.record.readReceipts, !receipts.isEmpty else { return "Sent" }
             let read = receipts.filter(\.read)
