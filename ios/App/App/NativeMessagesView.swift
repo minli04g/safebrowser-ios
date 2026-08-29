@@ -349,9 +349,38 @@ private struct NativeKeyboardBackdrop: UIViewRepresentable {
     }
 }
 
-private final class NativeGrowingMessageTextView: UITextView {
+@available(iOS 16.0, *)
+private final class NativeMessageEditMenuDelegate: NSObject, UIEditMenuInteractionDelegate {
+    weak var textView: UITextView?
+
+    init(textView: UITextView) {
+        self.textView = textView
+    }
+
+    func editMenuInteraction(
+        _ interaction: UIEditMenuInteraction,
+        menuFor configuration: UIEditMenuConfiguration,
+        suggestedActions: [UIMenuElement]
+    ) -> UIMenu? {
+        if !suggestedActions.isEmpty {
+            return UIMenu(children: suggestedActions)
+        }
+        guard let textView,
+              textView.canPerformAction(#selector(UIResponderStandardEditActions.paste(_:)), withSender: nil)
+        else { return nil }
+        return UIMenu(children: [
+            UIAction(title: "Paste", image: UIImage(systemName: "doc.on.clipboard")) { [weak textView] _ in
+                textView?.paste(nil)
+            }
+        ])
+    }
+}
+
+private final class NativeGrowingMessageTextView: UITextView, UIGestureRecognizerDelegate {
     let placeholderLabel = UILabel()
     var onLayout: ((NativeGrowingMessageTextView) -> Void)?
+    private var explicitEditMenuInteraction: AnyObject?
+    private var explicitEditMenuDelegate: AnyObject?
 
     override var intrinsicContentSize: CGSize {
         CGSize(width: UIView.noIntrinsicMetric, height: UIView.noIntrinsicMetric)
@@ -370,6 +399,18 @@ private final class NativeGrowingMessageTextView: UITextView {
             placeholderLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
             placeholderLabel.topAnchor.constraint(equalTo: topAnchor, constant: 5)
         ])
+        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(showEditingMenu(_:)))
+        longPress.minimumPressDuration = 0.45
+        longPress.cancelsTouchesInView = false
+        longPress.delegate = self
+        addGestureRecognizer(longPress)
+        if #available(iOS 16.0, *) {
+            let menuDelegate = NativeMessageEditMenuDelegate(textView: self)
+            let interaction = UIEditMenuInteraction(delegate: menuDelegate)
+            addInteraction(interaction)
+            explicitEditMenuDelegate = menuDelegate
+            explicitEditMenuInteraction = interaction
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -398,6 +439,36 @@ private final class NativeGrowingMessageTextView: UITextView {
     func updatePlaceholder() {
         placeholderLabel.isHidden = !text.isEmpty
     }
+
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(UIResponderStandardEditActions.paste(_:)) {
+            return isEditable && UIPasteboard.general.hasStrings
+        }
+        return super.canPerformAction(action, withSender: sender)
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        true
+    }
+
+    @objc private func showEditingMenu(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began, isEditable, isSelectable else { return }
+        if !isFirstResponder { becomeFirstResponder() }
+        let point = gesture.location(in: self)
+        let position = closestPosition(to: point) ?? endOfDocument
+        selectedTextRange = textRange(from: position, to: position)
+        if #available(iOS 16.0, *),
+           let interaction = explicitEditMenuInteraction as? UIEditMenuInteraction {
+            interaction.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: point))
+        } else {
+            let caret = caretRect(for: position)
+            let target = caret.isEmpty ? CGRect(x: point.x, y: point.y, width: 1, height: 1) : caret
+            UIMenuController.shared.showMenu(from: self, rect: target)
+        }
+    }
 }
 
 private struct NativeMessageTextField: UIViewRepresentable {
@@ -417,6 +488,9 @@ private struct NativeMessageTextField: UIViewRepresentable {
     func makeUIView(context: Context) -> NativeGrowingMessageTextView {
         let textView = NativeGrowingMessageTextView(frame: .zero)
         textView.delegate = context.coordinator
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.isUserInteractionEnabled = true
         textView.returnKeyType = .send
         textView.enablesReturnKeyAutomatically = true
         textView.autocorrectionType = .yes
@@ -524,6 +598,56 @@ private enum NativeComposerMode: Equatable {
     case emoji
     case more
     case voice
+}
+
+private enum NativeMessageTimestampFormatter {
+    static func string(
+        from date: Date,
+        relativeTo referenceDate: Date = Date(),
+        calendar: Calendar = .autoupdatingCurrent,
+        locale: Locale = .autoupdatingCurrent
+    ) -> String {
+        let time = formatted(date, template: "jm", calendar: calendar, locale: locale)
+        let messageDay = calendar.startOfDay(for: date)
+        let referenceDay = calendar.startOfDay(for: referenceDate)
+        let dayDifference = calendar.dateComponents([.day], from: messageDay, to: referenceDay).day ?? 0
+
+        if dayDifference == 0 { return time }
+        if dayDifference == 1 {
+            let formatter = DateFormatter()
+            formatter.calendar = calendar
+            formatter.locale = locale
+            formatter.timeZone = calendar.timeZone
+            formatter.dateStyle = .medium
+            formatter.timeStyle = .none
+            formatter.doesRelativeDateFormatting = true
+            return "\(formatter.string(from: date)) \(time)"
+        }
+
+        let dateLabel: String
+        if dayDifference > 1 && dayDifference < 7 {
+            dateLabel = formatted(date, template: "EEE", calendar: calendar, locale: locale)
+        } else if calendar.component(.year, from: date) == calendar.component(.year, from: referenceDate) {
+            dateLabel = formatted(date, template: "MMMd", calendar: calendar, locale: locale)
+        } else {
+            dateLabel = formatted(date, template: "yMd", calendar: calendar, locale: locale)
+        }
+        return "\(dateLabel) \(time)"
+    }
+
+    private static func formatted(
+        _ date: Date,
+        template: String,
+        calendar: Calendar,
+        locale: Locale
+    ) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = locale
+        formatter.timeZone = calendar.timeZone
+        formatter.setLocalizedDateFormatFromTemplate(template)
+        return formatter.string(from: date)
+    }
 }
 
 private struct NativeMessageThreadView: View {
@@ -648,7 +772,10 @@ private struct NativeMessageThreadView: View {
                     }
                     ForEach(messages) { message in
                         if shouldShowTimestamp(for: message) {
-                            Text(message.record.date, style: .time)
+                            Text(NativeMessageTimestampFormatter.string(
+                                from: message.record.date,
+                                relativeTo: recallEligibilityNow
+                            ))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
@@ -921,7 +1048,10 @@ private struct NativeMessageThreadView: View {
     private func shouldShowTimestamp(for message: NativeDisplayMessage) -> Bool {
         guard let index = messages.firstIndex(where: { $0.id == message.id }) else { return false }
         guard index > 0 else { return true }
-        return messages[index].record.date.timeIntervalSince(messages[index - 1].record.date) >= 5 * 60
+        let previousDate = messages[index - 1].record.date
+        let currentDate = messages[index].record.date
+        return !Calendar.autoupdatingCurrent.isDate(previousDate, inSameDayAs: currentDate)
+            || currentDate.timeIntervalSince(previousDate) >= 5 * 60
     }
 
     private func scrollToLatest(using proxy: ScrollViewProxy) {
