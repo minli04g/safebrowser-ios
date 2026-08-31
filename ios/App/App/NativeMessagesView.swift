@@ -419,21 +419,7 @@ private final class NativeGrowingMessageTextView: UITextView, UIGestureRecognize
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        enforceWrappedLayout()
         onLayout?(self)
-    }
-
-    func enforceWrappedLayout() {
-        let availableWidth = max(
-            1,
-            bounds.width - textContainerInset.left - textContainerInset.right
-        )
-        if abs(textContainer.size.width - availableWidth) > 0.5 {
-            textContainer.size = CGSize(width: availableWidth, height: .greatestFiniteMagnitude)
-        }
-        if abs(contentOffset.x) > 0.5 {
-            contentOffset = CGPoint(x: 0, y: contentOffset.y)
-        }
     }
 
     func updatePlaceholder() {
@@ -501,7 +487,7 @@ private struct NativeMessageTextField: UIViewRepresentable {
         textView.textContainerInset = UIEdgeInsets(top: 5, left: 0, bottom: 5, right: 0)
         textView.textContainer.lineFragmentPadding = 0
         textView.textContainer.lineBreakMode = .byCharWrapping
-        textView.textContainer.widthTracksTextView = false
+        textView.textContainer.widthTracksTextView = true
         textView.isScrollEnabled = false
         textView.alwaysBounceHorizontal = false
         textView.showsHorizontalScrollIndicator = false
@@ -571,11 +557,10 @@ private struct NativeMessageTextField: UIViewRepresentable {
 
         func updateHeight(for textView: NativeGrowingMessageTextView) {
             guard textView.bounds.width > 0 else { return }
-            textView.enforceWrappedLayout()
-            textView.layoutManager.ensureLayout(for: textView.textContainer)
-            let textHeight = textView.layoutManager.usedRect(for: textView.textContainer).height
             let measuredHeight = ceil(
-                textHeight + textView.textContainerInset.top + textView.textContainerInset.bottom
+                textView.sizeThatFits(
+                    CGSize(width: textView.bounds.width, height: .greatestFiniteMagnitude)
+                ).height
             )
             let targetHeight = min(parent.maximumHeight, max(parent.minimumHeight, measuredHeight))
             let shouldScroll = measuredHeight > parent.maximumHeight
